@@ -6,8 +6,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v3
-      - name: Prepare java
+      - name: Install Java
         uses: actions/setup-java@v3
         with:
           distribution: 'zulu'
           java-version: '21'
+      - name: Install clj-kondo
+        uses: DeLaGuardo/setup-clojure@13.0
+        with:
+          clj-kondo: 2022.05.31
+      - name: Lint
+        run: clj-kondo --lint src
