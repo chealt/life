@@ -11,6 +11,13 @@ jobs:
         with:
           distribution: 'zulu'
           java-version: '21'
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.deps.clj
+          key: cljdeps-${{ hashFiles('deps.edn') }}
+          restore-keys: cljdeps-
       - name: Install clj-kondo
         uses: DeLaGuardo/setup-clojure@13.0
         with:
