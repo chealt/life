@@ -32,14 +32,12 @@ static mu_Context *g_ctx;
 static int g_fb_width, g_fb_height;  // framebuffer pixels
 static int g_scale = 1;              // integer UI scale (from devicePixelRatio)
 
-// Demo state, so there is something to drive from the UI.
-static float g_clear[3] = { 0.09f, 0.09f, 0.12f };
+static const float g_clear[3] = { 0.09f, 0.09f, 0.12f };
 static float g_speed = 1.0f;
-static int   g_running = 1;
 
 // The first thing being simulated: one red blood cell, drifting.
 #define CELL_RADIUS 48.0f      // world units
-static double g_sim_time;      // seconds, advanced only while running
+static double g_sim_time;      // seconds
 static double g_last_now;      // emscripten_get_now() at the previous frame
 
 // Camera. World units are scaled by this on the way to the screen; the UI is
@@ -148,28 +146,45 @@ static bool on_key(int type, const EmscriptenKeyboardEvent *e, void *ud) {
 
 /* ------------------------------------------------------------------- ui -- */
 
+// microui ships a grey debug-tool palette. Everything here is still an
+// axis-aligned rect -- it has no rounded corners or gradients -- so the look
+// comes from colour, weight and spacing: a near-black translucent panel, no
+// borders, and one red accent that ties the UI to what is being simulated.
+static void apply_style(void) {
+    mu_Style *s = g_ctx->style;
+
+    s->size          = mu_vec2(68, 16);  // taller controls, easier to hit
+    s->padding       = 8;
+    s->spacing       = 7;
+    s->title_height  = 30;
+    s->scrollbar_size = 10;
+    s->thumb_size    = 10;
+
+    s->colors[MU_COLOR_TEXT]        = mu_color(198, 202, 212, 255);
+    s->colors[MU_COLOR_BORDER]      = mu_color(0, 0, 0, 0);       // borderless
+    s->colors[MU_COLOR_WINDOWBG]    = mu_color(18, 19, 24, 232);  // sits over the sim
+    s->colors[MU_COLOR_TITLEBG]     = mu_color(26, 28, 35, 255);
+    s->colors[MU_COLOR_TITLETEXT]   = mu_color(236, 238, 243, 255);
+    s->colors[MU_COLOR_PANELBG]     = mu_color(0, 0, 0, 0);
+    s->colors[MU_COLOR_BUTTON]      = mu_color(38, 41, 51, 255);
+    s->colors[MU_COLOR_BUTTONHOVER] = mu_color(50, 54, 68, 255);
+    s->colors[MU_COLOR_BUTTONFOCUS] = mu_color(200, 45, 50, 255);  // accent
+    s->colors[MU_COLOR_BASE]        = mu_color(30, 32, 40, 255);
+    s->colors[MU_COLOR_BASEHOVER]   = mu_color(40, 43, 54, 255);
+    s->colors[MU_COLOR_BASEFOCUS]   = mu_color(200, 45, 50, 255);  // accent
+    s->colors[MU_COLOR_SCROLLBASE]  = mu_color(24, 26, 32, 255);
+    s->colors[MU_COLOR_SCROLLTHUMB] = mu_color(58, 62, 74, 255);
+}
+
 static void build_ui(void) {
-    if (mu_begin_window(g_ctx, "life", mu_rect(24, 24, 300, 210))) {
+    if (mu_begin_window(g_ctx, "life", mu_rect(24, 24, 280, 150))) {
         mu_layout_row(g_ctx, 2, (int[]){ 90, -1 }, 0);
 
         mu_label(g_ctx, "speed");
         mu_slider(g_ctx, &g_speed, 0.0f, 10.0f);
-        char zoom[16];
-        snprintf(zoom, sizeof(zoom), "%.0f%%", g_zoom * 100.0f);
-        mu_label(g_ctx, "zoom");
-        mu_label(g_ctx, zoom);
-
-        mu_label(g_ctx, "red");
-        mu_slider(g_ctx, &g_clear[0], 0.0f, 1.0f);
-        mu_label(g_ctx, "green");
-        mu_slider(g_ctx, &g_clear[1], 0.0f, 1.0f);
-        mu_label(g_ctx, "blue");
-        mu_slider(g_ctx, &g_clear[2], 0.0f, 1.0f);
 
         mu_layout_row(g_ctx, 1, (int[]){ -1 }, 0);
-        mu_checkbox(g_ctx, "running", &g_running);
         if (mu_button(g_ctx, "reset")) {
-            g_clear[0] = 0.09f; g_clear[1] = 0.09f; g_clear[2] = 0.12f;
             g_speed = 1.0f;
             g_zoom = 1.0f;
         }
@@ -212,7 +227,7 @@ static void frame(void) {
     double dt = g_last_now > 0.0 ? now - g_last_now : 0.0;
     g_last_now = now;
     if (dt > 0.1) dt = 0.1;  // a backgrounded tab can hand back a huge delta
-    if (g_running) g_sim_time += dt * g_speed;
+    g_sim_time += dt * g_speed;
 
     mu_begin(g_ctx);
     build_ui();
@@ -296,6 +311,7 @@ static void start(void) {
     mu_init(g_ctx);
     g_ctx->text_width  = text_width;
     g_ctx->text_height = text_height;
+    apply_style();
 
     r_init(g_device, g_queue, kSurfaceFormat);
     cells_init(g_device, g_queue, kSurfaceFormat);
