@@ -243,9 +243,12 @@ VesselStats vessel_build(const VesselParams &params, std::vector<VesselSegment> 
                             Vec3{ 1.0f, 0.0f, 0.0f },
                             kTrunkRadius, stats.requested_length, 0, 0x5EEDu });
 
-    while (!stack.empty() && out.size() < kMaxSegments) {
-        Branch b = stack.back();
-        stack.pop_back();
+    // Breadth first. Depth first would spend the whole segment budget running
+    // one branch to its end, leaving the rest of the tree unbuilt -- so a
+    // longer vessel would show *less* of itself, not more.
+    std::size_t head = 0;
+    while (head < stack.size() && out.size() < kMaxSegments) {
+        Branch b = stack[head++];
 
         Rng rng{ b.seed | 1u };
         float run = 0.0f;  // distance this branch has covered since it started
@@ -253,12 +256,22 @@ VesselStats vessel_build(const VesselParams &params, std::vector<VesselSegment> 
         while (b.budget > 0.0 && out.size() < kMaxSegments) {
             const float step = static_cast<float>(std::min<double>(kStep, b.budget));
 
-            // A gentle wander, so vessels do not look like drawn diagrams.
+            // A gentle wander, so vessels do not look like drawn diagrams,
+            // plus a push away from the trunk axis. Branches that keep
+            // heading outward run into each other far less than ones left to
+            // wander freely, though nothing here strictly prevents it.
             Vec3 su, sv;
             basis_from_axis(b.dir, su, sv);
             const Vec3 frame_in = b.frame;
-            b.dir = normalize(b.dir + su * rng.range(-0.12f, 0.12f) +
-                                      sv * rng.range(-0.12f, 0.12f));
+
+            Vec3 outward{ b.pos.x, b.pos.y, 0.0f };
+            const float spread = std::sqrt(dot(outward, outward));
+            if (spread > 1e-3f && b.depth > 0) {
+                outward = outward * (1.0f / spread);
+                b.dir = normalize(b.dir + outward * 0.06f);
+            }
+            b.dir = normalize(b.dir + su * rng.range(-0.08f, 0.08f) +
+                                      sv * rng.range(-0.08f, 0.08f));
 
             // Parallel transport: keep the reference direction as close to
             // where it was as the axis allows, rather than rebuilding it.
@@ -272,16 +285,30 @@ VesselStats vessel_build(const VesselParams &params, std::vector<VesselSegment> 
             run += step;
             stats.built_length += step;
 
+            if (run < kForkInterval) continue;
+
             const bool can_fork = b.depth < kMaxDepth &&
                                   b.radius * kMurray > kCapillaryRadius;
-            if (run >= kForkInterval && can_fork && b.budget > kStep) {
+            if (!can_fork || b.budget <= kStep) {
+                // A branch too narrow to divide still has to yield here.
+                // Letting it run its whole budget would hand the entire
+                // segment allowance to whichever one happened to come first,
+                // which is why the tree used to vanish at long lengths.
+                if (b.budget > 0.0) {
+                    b.seed = rng.next();
+                    stack.push_back(b);
+                }
+                break;
+            }
+
+            {
                 Vec3 fu, fv;
                 basis_from_axis(b.dir, fu, fv);
                 // Split the plane of the fork around the axis, so the tree is
                 // not flat.
                 const float roll  = rng.range(0.0f, 6.2831853f);
                 const Vec3  side  = normalize(fu * std::cos(roll) + fv * std::sin(roll));
-                const float angle = rng.range(0.35f, 0.62f);
+                const float angle = rng.range(0.55f, 0.85f);
                 const float child_r = b.radius * kMurray;
 
                 // The children share what is left, so the total length over
@@ -380,7 +407,10 @@ void vessel_fill(std::span<const VesselSegment> segments, std::size_t cap,
             const float sr    = std::sqrt(std::max(0.0f, 1.0f - uu * uu));
             c.normal = Vec3{ sr * std::cos(theta), sr * std::sin(theta), uu };
 
-            c.radius = kRedCellRadius * rng.range(0.92f, 1.08f);
+            // Never wider than the lumen: a rigid disc bigger than its vessel
+            // reads as a mistake even where a real cell would simply fold.
+            c.radius = std::min(kRedCellRadius * rng.range(0.92f, 1.08f),
+                                radius_here * 0.82f);
             c.spin   = rng.range(0.0f, 6.2831853f);
             c.seed   = rng.unit();
             c.kind   = CellKind::RedBlood;

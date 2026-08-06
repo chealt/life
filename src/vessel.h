@@ -21,8 +21,12 @@ inline constexpr float kRedCellVolume = 90.0f;   // um^3, a real MCV
 inline constexpr float kHaematocrit   = 0.45f;
 
 // A venule at the trunk, tapering toward capillary calibre as it divides.
+// Real capillaries run 5-10um across and red cells fold to squeeze through
+// them; these cells are rigid discs, so the floor is set above the cell
+// diameter instead. Narrower than this and cells would visibly pierce the
+// wall.
 inline constexpr float kTrunkRadius     = 18.0f;  // um
-inline constexpr float kCapillaryRadius = 3.5f;   // um
+inline constexpr float kCapillaryRadius = 5.0f;   // um
 
 struct VesselSegment {
     Vec3  a{}, b{};
