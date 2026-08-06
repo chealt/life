@@ -3,7 +3,14 @@
 #include <stddef.h>
 
 #include "renderer.h"
+
+// microui's atlas indexes its initialiser with [MU_ICON_CLOSE] = {...}, a C99
+// array designator that C++ never adopted. Clang accepts it as an extension;
+// the warning is upstream's to fix, not ours.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wc99-designator"
 #include "atlas.inl"
+#pragma clang diagnostic pop
 
 #define MAX_QUADS   8192
 #define MAX_BATCHES 256
@@ -78,7 +85,7 @@ static int rect_eq(mu_Rect a, mu_Rect b) {
 }
 
 static WGPUTexture create_atlas_texture(void) {
-    WGPUTextureDescriptor desc = {0};
+    WGPUTextureDescriptor desc = {};
     desc.dimension     = WGPUTextureDimension_2D;
     desc.size.width    = ATLAS_WIDTH;
     desc.size.height   = ATLAS_HEIGHT;
@@ -89,11 +96,11 @@ static WGPUTexture create_atlas_texture(void) {
     desc.usage         = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
     WGPUTexture texture = wgpuDeviceCreateTexture(g_device, &desc);
 
-    WGPUTexelCopyTextureInfo dst = {0};
+    WGPUTexelCopyTextureInfo dst = {};
     dst.texture  = texture;
     dst.aspect   = WGPUTextureAspect_All;
 
-    WGPUTexelCopyBufferLayout layout = {0};
+    WGPUTexelCopyBufferLayout layout = {};
     layout.bytesPerRow  = ATLAS_WIDTH;
     layout.rowsPerImage = ATLAS_HEIGHT;
 
@@ -104,14 +111,14 @@ static WGPUTexture create_atlas_texture(void) {
 }
 
 static void create_pipeline(WGPUTextureFormat format) {
-    WGPUShaderSourceWGSL wgsl = {0};
+    WGPUShaderSourceWGSL wgsl = {};
     wgsl.chain.sType = WGPUSType_ShaderSourceWGSL;
     wgsl.code = str(kShader);
-    WGPUShaderModuleDescriptor module_desc = {0};
+    WGPUShaderModuleDescriptor module_desc = {};
     module_desc.nextInChain = &wgsl.chain;
     WGPUShaderModule module = wgpuDeviceCreateShaderModule(g_device, &module_desc);
 
-    WGPUVertexAttribute attrs[3] = {0};
+    WGPUVertexAttribute attrs[3] = {};
     attrs[0].format = WGPUVertexFormat_Float32x2;
     attrs[0].offset = offsetof(Vertex, x);
     attrs[0].shaderLocation = 0;
@@ -122,14 +129,14 @@ static void create_pipeline(WGPUTextureFormat format) {
     attrs[2].offset = offsetof(Vertex, color);
     attrs[2].shaderLocation = 2;
 
-    WGPUVertexBufferLayout vb_layout = {0};
+    WGPUVertexBufferLayout vb_layout = {};
     vb_layout.arrayStride    = sizeof(Vertex);
     vb_layout.stepMode       = WGPUVertexStepMode_Vertex;
     vb_layout.attributeCount = 3;
     vb_layout.attributes     = attrs;
 
     // Straight (non-premultiplied) alpha, matching microui's colours.
-    WGPUBlendState blend = {0};
+    WGPUBlendState blend = {};
     blend.color.operation = WGPUBlendOperation_Add;
     blend.color.srcFactor = WGPUBlendFactor_SrcAlpha;
     blend.color.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
@@ -137,18 +144,18 @@ static void create_pipeline(WGPUTextureFormat format) {
     blend.alpha.srcFactor = WGPUBlendFactor_One;
     blend.alpha.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
 
-    WGPUColorTargetState target = {0};
+    WGPUColorTargetState target = {};
     target.format    = format;
     target.blend     = &blend;
     target.writeMask = WGPUColorWriteMask_All;
 
-    WGPUFragmentState fragment = {0};
+    WGPUFragmentState fragment = {};
     fragment.module      = module;
     fragment.entryPoint  = str("fs");
     fragment.targetCount = 1;
     fragment.targets     = &target;
 
-    WGPURenderPipelineDescriptor desc = {0};
+    WGPURenderPipelineDescriptor desc = {};
     desc.layout                 = NULL;  // auto layout, inferred from the shader
     desc.vertex.module          = module;
     desc.vertex.entryPoint      = str("vs");
@@ -170,27 +177,27 @@ void r_init(WGPUDevice device, WGPUQueue queue, WGPUTextureFormat format) {
 
     create_pipeline(format);
 
-    WGPUBufferDescriptor vb = {0};
+    WGPUBufferDescriptor vb = {};
     vb.usage = WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst;
     vb.size  = sizeof(g_vertices);
     g_vertex_buffer = wgpuDeviceCreateBuffer(g_device, &vb);
 
     // Every primitive is a quad, so the index buffer is fixed: build it once.
-    uint32_t *indices = malloc(MAX_QUADS * 6 * sizeof(uint32_t));
+    uint32_t *indices = (uint32_t *)malloc(MAX_QUADS * 6 * sizeof(uint32_t));
     for (int i = 0; i < MAX_QUADS; i++) {
         uint32_t v = (uint32_t)i * 4;
         uint32_t *p = &indices[i * 6];
         p[0] = v; p[1] = v + 1; p[2] = v + 2;
         p[3] = v + 2; p[4] = v + 3; p[5] = v;
     }
-    WGPUBufferDescriptor ib = {0};
+    WGPUBufferDescriptor ib = {};
     ib.usage = WGPUBufferUsage_Index | WGPUBufferUsage_CopyDst;
     ib.size  = MAX_QUADS * 6 * sizeof(uint32_t);
     g_index_buffer = wgpuDeviceCreateBuffer(g_device, &ib);
     wgpuQueueWriteBuffer(g_queue, g_index_buffer, 0, indices, ib.size);
     free(indices);
 
-    WGPUBufferDescriptor ub = {0};
+    WGPUBufferDescriptor ub = {};
     ub.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
     ub.size  = 16;
     g_uniform_buffer = wgpuDeviceCreateBuffer(g_device, &ub);
@@ -199,7 +206,7 @@ void r_init(WGPUDevice device, WGPUQueue queue, WGPUTextureFormat format) {
     WGPUTextureView atlas_view = wgpuTextureCreateView(atlas_tex, NULL);
 
     // Nearest filtering keeps the bitmap font crisp under integer UI scaling.
-    WGPUSamplerDescriptor sd = {0};
+    WGPUSamplerDescriptor sd = {};
     sd.addressModeU = WGPUAddressMode_ClampToEdge;
     sd.addressModeV = WGPUAddressMode_ClampToEdge;
     sd.addressModeW = WGPUAddressMode_ClampToEdge;
@@ -209,7 +216,7 @@ void r_init(WGPUDevice device, WGPUQueue queue, WGPUTextureFormat format) {
     sd.maxAnisotropy = 1;
     WGPUSampler sampler = wgpuDeviceCreateSampler(g_device, &sd);
 
-    WGPUBindGroupEntry entries[3] = {0};
+    WGPUBindGroupEntry entries[3] = {};
     entries[0].binding = 0;
     entries[0].buffer  = g_uniform_buffer;
     entries[0].size    = 16;
@@ -218,7 +225,7 @@ void r_init(WGPUDevice device, WGPUQueue queue, WGPUTextureFormat format) {
     entries[2].binding = 2;
     entries[2].textureView = atlas_view;
 
-    WGPUBindGroupDescriptor bgd = {0};
+    WGPUBindGroupDescriptor bgd = {};
     bgd.layout     = wgpuRenderPipelineGetBindGroupLayout(g_pipeline, 0);
     bgd.entryCount = 3;
     bgd.entries    = entries;
@@ -247,10 +254,10 @@ static void push_quad(mu_Rect dst, mu_Rect src, mu_Color color) {
                           ((uint32_t)color.b << 16) | ((uint32_t)color.a << 24);
 
     Vertex *v = &g_vertices[g_quad_count * 4];
-    v[0] = (Vertex){ x0, y0, u0, v0, rgba };
-    v[1] = (Vertex){ x1, y0, u1, v0, rgba };
-    v[2] = (Vertex){ x1, y1, u1, v1, rgba };
-    v[3] = (Vertex){ x0, y1, u0, v1, rgba };
+    v[0] = Vertex{ x0, y0, u0, v0, rgba };
+    v[1] = Vertex{ x1, y0, u1, v0, rgba };
+    v[2] = Vertex{ x1, y1, u1, v1, rgba };
+    v[3] = Vertex{ x0, y1, u0, v1, rgba };
 
     b->index_count += 6;
     g_quad_count++;

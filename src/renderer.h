@@ -3,7 +3,12 @@
 #define RENDERER_H
 
 #include <webgpu/webgpu.h>
+
+// microui stays C and has no linkage guards of its own, so every C++ include
+// of it has to name the linkage.
+extern "C" {
 #include "microui.h"
+}
 
 void r_init(WGPUDevice device, WGPUQueue queue, WGPUTextureFormat format);
 

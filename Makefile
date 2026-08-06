@@ -1,19 +1,19 @@
 EMCC   ?= emcc
-# emdawnwebgpu implements the webgpu.h C API in C++, so the *link* needs em++.
-# Compilation stays C99 -- only the final link pulls the C++ runtime in.
 EMXX   ?= em++
 MICROUI = third_party/microui
 BUILD  ?= build
 PORT   ?= 8000
 
-SOURCES = src/main.c src/renderer.c src/cells.c $(MICROUI)/src/microui.c
 OBJECTS = $(BUILD)/main.o $(BUILD)/renderer.o $(BUILD)/cells.o $(BUILD)/microui.o
 
-CFLAGS = \
-	-std=c99 \
-	-I$(MICROUI)/src -I$(MICROUI)/demo -Isrc \
-	-Os -msimd128 \
-	--use-port=emdawnwebgpu
+INCLUDES = -I$(MICROUI)/src -I$(MICROUI)/demo -Isrc
+
+COMMON = $(INCLUDES) -Os -msimd128 --use-port=emdawnwebgpu
+
+CXXFLAGS = -std=c++17 $(COMMON)
+
+# microui is upstream C and stays that way; only our own sources are C++.
+CFLAGS = -std=c99 $(COMMON)
 
 LDFLAGS = \
 	--use-port=emdawnwebgpu \
@@ -36,14 +36,14 @@ $(MICROUI)/src/microui.c:
 $(BUILD)/index.html: $(OBJECTS) src/shell.html
 	$(EMXX) $(OBJECTS) $(LDFLAGS) -o $@
 
-$(BUILD)/main.o: src/main.c src/renderer.h src/cells.h $(MICROUI)/src/microui.c | $(BUILD)
-	$(EMCC) $(CFLAGS) -c $< -o $@
+$(BUILD)/main.o: src/main.cpp src/renderer.h src/cells.h $(MICROUI)/src/microui.c | $(BUILD)
+	$(EMXX) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD)/cells.o: src/cells.c src/cells.h | $(BUILD)
-	$(EMCC) $(CFLAGS) -c $< -o $@
+$(BUILD)/renderer.o: src/renderer.cpp src/renderer.h $(MICROUI)/src/microui.c | $(BUILD)
+	$(EMXX) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD)/renderer.o: src/renderer.c src/renderer.h $(MICROUI)/src/microui.c | $(BUILD)
-	$(EMCC) $(CFLAGS) -c $< -o $@
+$(BUILD)/cells.o: src/cells.cpp src/cells.h | $(BUILD)
+	$(EMXX) $(CXXFLAGS) -c $< -o $@
 
 # Depends on microui.c only -- the clone produces atlas.inl at the same time.
 $(BUILD)/microui.o: $(MICROUI)/src/microui.c | $(BUILD)

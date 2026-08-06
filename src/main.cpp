@@ -13,8 +13,7 @@
 #include <emscripten/html5.h>
 #include <webgpu/webgpu.h>
 
-#include "microui.h"
-#include "renderer.h"
+#include "renderer.h"  // pulls in microui.h with C linkage
 #include "cells.h"
 
 #define CANVAS "#canvas"
@@ -178,12 +177,14 @@ static void apply_style(void) {
 
 static void build_ui(void) {
     if (mu_begin_window(g_ctx, "life", mu_rect(24, 24, 280, 150))) {
-        mu_layout_row(g_ctx, 2, (int[]){ 90, -1 }, 0);
+        static const int row_label_field[] = { 90, -1 };
+        mu_layout_row(g_ctx, 2, row_label_field, 0);
 
         mu_label(g_ctx, "speed");
         mu_slider(g_ctx, &g_speed, 0.0f, 10.0f);
 
-        mu_layout_row(g_ctx, 1, (int[]){ -1 }, 0);
+        static const int row_full[] = { -1 };
+        mu_layout_row(g_ctx, 1, row_full, 0);
         if (mu_button(g_ctx, "reset")) {
             g_speed = 1.0f;
             g_zoom = 1.0f;
@@ -196,7 +197,7 @@ static void build_ui(void) {
 /* ---------------------------------------------------------------- frame -- */
 
 static void configure_surface(int w, int h) {
-    WGPUSurfaceConfiguration config = {0};
+    WGPUSurfaceConfiguration config = {};
     config.device      = g_device;
     config.format      = kSurfaceFormat;
     config.usage       = WGPUTextureUsage_RenderAttachment;
@@ -254,20 +255,20 @@ static void frame(void) {
         }
     }
 
-    WGPUSurfaceTexture surface_texture = {0};
+    WGPUSurfaceTexture surface_texture = {};
     wgpuSurfaceGetCurrentTexture(g_surface, &surface_texture);
     if (!surface_texture.texture) return;
     WGPUTextureView view = wgpuTextureCreateView(surface_texture.texture, NULL);
 
-    WGPURenderPassColorAttachment color = {0};
+    WGPURenderPassColorAttachment color = {};
     color.view       = view;
     color.loadOp     = WGPULoadOp_Clear;
     color.storeOp    = WGPUStoreOp_Store;
-    color.clearValue = (WGPUColor){ g_clear[0], g_clear[1], g_clear[2], 1.0 };
+    color.clearValue = WGPUColor{ g_clear[0], g_clear[1], g_clear[2], 1.0 };
     // Required since the 2024 webgpu.h revision; zero here is a validation error.
     color.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
 
-    WGPURenderPassDescriptor pass_desc = {0};
+    WGPURenderPassDescriptor pass_desc = {};
     pass_desc.colorAttachmentCount = 1;
     pass_desc.colorAttachments     = &color;
 
@@ -307,7 +308,7 @@ static void start(void) {
     g_scale = (int)(dpr + 0.5);
     if (g_scale < 1) g_scale = 1;
 
-    g_ctx = malloc(sizeof(mu_Context));
+    g_ctx = new mu_Context();
     mu_init(g_ctx);
     g_ctx->text_width  = text_width;
     g_ctx->text_height = text_height;
@@ -341,11 +342,11 @@ static void on_device(WGPURequestDeviceStatus status, WGPUDevice device,
     g_device = device;
     g_queue  = wgpuDeviceGetQueue(g_device);
 
-    WGPUEmscriptenSurfaceSourceCanvasHTMLSelector canvas_desc = {0};
+    WGPUEmscriptenSurfaceSourceCanvasHTMLSelector canvas_desc = {};
     canvas_desc.chain.sType = WGPUSType_EmscriptenSurfaceSourceCanvasHTMLSelector;
-    canvas_desc.selector    = (WGPUStringView){ CANVAS, WGPU_STRLEN };
+    canvas_desc.selector    = WGPUStringView{ CANVAS, WGPU_STRLEN };
 
-    WGPUSurfaceDescriptor surface_desc = {0};
+    WGPUSurfaceDescriptor surface_desc = {};
     surface_desc.nextInChain = &canvas_desc.chain;
     g_surface = wgpuInstanceCreateSurface(g_instance, &surface_desc);
 
@@ -361,8 +362,8 @@ static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter,
     }
     g_adapter = adapter;
 
-    WGPUDeviceDescriptor desc = {0};
-    WGPURequestDeviceCallbackInfo cb = {0};
+    WGPUDeviceDescriptor desc = {};
+    WGPURequestDeviceCallbackInfo cb = {};
     cb.mode     = WGPUCallbackMode_AllowSpontaneous;
     cb.callback = on_device;
     wgpuAdapterRequestDevice(g_adapter, &desc, cb);
@@ -375,8 +376,8 @@ int main(void) {
         return 1;
     }
 
-    WGPURequestAdapterOptions options = {0};
-    WGPURequestAdapterCallbackInfo cb = {0};
+    WGPURequestAdapterOptions options = {};
+    WGPURequestAdapterCallbackInfo cb = {};
     cb.mode     = WGPUCallbackMode_AllowSpontaneous;
     cb.callback = on_adapter;
     wgpuInstanceRequestAdapter(g_instance, &options, cb);

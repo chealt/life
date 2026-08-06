@@ -75,20 +75,20 @@ static WGPUStringView str(const char *s) {
 }
 
 static void create_pipeline(WGPUTextureFormat format) {
-    WGPUShaderSourceWGSL wgsl = {0};
+    WGPUShaderSourceWGSL wgsl = {};
     wgsl.chain.sType = WGPUSType_ShaderSourceWGSL;
     wgsl.code = str(kShader);
-    WGPUShaderModuleDescriptor module_desc = {0};
+    WGPUShaderModuleDescriptor module_desc = {};
     module_desc.nextInChain = &wgsl.chain;
     WGPUShaderModule module = wgpuDeviceCreateShaderModule(g_device, &module_desc);
 
     // Buffer 0 is the unit quad, stepped per vertex; buffer 1 is per instance.
-    WGPUVertexAttribute corner_attr = {0};
+    WGPUVertexAttribute corner_attr = {};
     corner_attr.format = WGPUVertexFormat_Float32x2;
     corner_attr.offset = 0;
     corner_attr.shaderLocation = 0;
 
-    WGPUVertexAttribute inst_attrs[3] = {0};
+    WGPUVertexAttribute inst_attrs[3] = {};
     inst_attrs[0].format = WGPUVertexFormat_Float32x2;
     inst_attrs[0].offset = offsetof(Instance, x);
     inst_attrs[0].shaderLocation = 1;
@@ -99,7 +99,7 @@ static void create_pipeline(WGPUTextureFormat format) {
     inst_attrs[2].offset = offsetof(Instance, color);
     inst_attrs[2].shaderLocation = 3;
 
-    WGPUVertexBufferLayout layouts[2] = {0};
+    WGPUVertexBufferLayout layouts[2] = {};
     layouts[0].arrayStride    = sizeof(float) * 2;
     layouts[0].stepMode       = WGPUVertexStepMode_Vertex;
     layouts[0].attributeCount = 1;
@@ -110,7 +110,7 @@ static void create_pipeline(WGPUTextureFormat format) {
     layouts[1].attributes     = inst_attrs;
 
     // Straight (non-premultiplied) alpha, matching the UI renderer.
-    WGPUBlendState blend = {0};
+    WGPUBlendState blend = {};
     blend.color.operation = WGPUBlendOperation_Add;
     blend.color.srcFactor = WGPUBlendFactor_SrcAlpha;
     blend.color.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
@@ -118,18 +118,18 @@ static void create_pipeline(WGPUTextureFormat format) {
     blend.alpha.srcFactor = WGPUBlendFactor_One;
     blend.alpha.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
 
-    WGPUColorTargetState target = {0};
+    WGPUColorTargetState target = {};
     target.format    = format;
     target.blend     = &blend;
     target.writeMask = WGPUColorWriteMask_All;
 
-    WGPUFragmentState fragment = {0};
+    WGPUFragmentState fragment = {};
     fragment.module      = module;
     fragment.entryPoint  = str("fs");
     fragment.targetCount = 1;
     fragment.targets     = &target;
 
-    WGPURenderPipelineDescriptor desc = {0};
+    WGPURenderPipelineDescriptor desc = {};
     desc.layout             = NULL;  // auto layout, inferred from the shader
     desc.vertex.module      = module;
     desc.vertex.entryPoint  = str("vs");
@@ -153,35 +153,35 @@ void cells_init(WGPUDevice device, WGPUQueue queue, WGPUTextureFormat format) {
 
     // The quad and its indices never change, so both are written once here.
     const float corners[8] = { -1.0f, -1.0f,  1.0f, -1.0f,  1.0f, 1.0f,  -1.0f, 1.0f };
-    WGPUBufferDescriptor cb = {0};
+    WGPUBufferDescriptor cb = {};
     cb.usage = WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst;
     cb.size  = sizeof(corners);
     g_corner_buffer = wgpuDeviceCreateBuffer(g_device, &cb);
     wgpuQueueWriteBuffer(g_queue, g_corner_buffer, 0, corners, sizeof(corners));
 
     const uint32_t indices[6] = { 0, 1, 2, 2, 3, 0 };
-    WGPUBufferDescriptor ib = {0};
+    WGPUBufferDescriptor ib = {};
     ib.usage = WGPUBufferUsage_Index | WGPUBufferUsage_CopyDst;
     ib.size  = sizeof(indices);
     g_index_buffer = wgpuDeviceCreateBuffer(g_device, &ib);
     wgpuQueueWriteBuffer(g_queue, g_index_buffer, 0, indices, sizeof(indices));
 
-    WGPUBufferDescriptor vb = {0};
+    WGPUBufferDescriptor vb = {};
     vb.usage = WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst;
     vb.size  = sizeof(g_instances);
     g_instance_buffer = wgpuDeviceCreateBuffer(g_device, &vb);
 
-    WGPUBufferDescriptor ub = {0};
+    WGPUBufferDescriptor ub = {};
     ub.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
     ub.size  = 16;
     g_uniform_buffer = wgpuDeviceCreateBuffer(g_device, &ub);
 
-    WGPUBindGroupEntry entry = {0};
+    WGPUBindGroupEntry entry = {};
     entry.binding = 0;
     entry.buffer  = g_uniform_buffer;
     entry.size    = 16;
 
-    WGPUBindGroupDescriptor bgd = {0};
+    WGPUBindGroupDescriptor bgd = {};
     bgd.layout     = wgpuRenderPipelineGetBindGroupLayout(g_pipeline, 0);
     bgd.entryCount = 1;
     bgd.entries    = &entry;
@@ -196,7 +196,7 @@ void cells_begin(int width, int height) {
 
 void cells_add(float x, float y, float radius, uint32_t rgba) {
     if (g_count >= MAX_CELLS) return;
-    g_instances[g_count++] = (Instance){ x, y, radius, rgba };
+    g_instances[g_count++] = Instance{ x, y, radius, rgba };
 }
 
 void cells_end(WGPURenderPassEncoder pass) {

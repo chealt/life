@@ -9,6 +9,7 @@
         "--sysroot=${env:HOME}/Code/emscripten-core/emsdk/upstream/emscripten/cache/sysroot"
       ],
       "cStandard": "c99",
+      "cppStandard": "c++17",
       "intelliSenseMode": "clang-x64",
       "includePath": [
         "${workspaceFolder}/src",

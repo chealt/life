@@ -65,6 +65,9 @@ Two more that bite on newer toolchains:
 - `emscripten/html5.h` callbacks return `bool`, not the old `EM_BOOL`/`int`.
   A mismatch shows up as *incompatible function pointer types* at every
   `emscripten_set_*_callback` call.
-- Linking with `emcc` fails with *emdawnwebgpu requires C++*. The Makefile
-  compiles with `emcc` and links with `em++`; `emcc -sDEFAULT_TO_CXX` also
-  works but compiles the `.c` files as C++.
+- Linking with `emcc` fails with *emdawnwebgpu requires C++*. Everything under
+  `src/` is C++ and builds with `em++`; only microui is C and builds with
+  `emcc`.
+- microui has no `extern "C"` guards of its own, so including `microui.h` from
+  C++ without naming the linkage gives undefined symbols at link time.
+  `renderer.h` wraps it; include that rather than microui directly.
