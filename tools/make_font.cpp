@@ -1,0 +1,186 @@
+// Generates src/font_atlas.h: a signed-distance-field atlas from a TTF.
+//
+// Run this only when the font or its size changes; the generated header is
+// committed, so an ordinary build needs neither this tool nor a font file.
+//
+//   curl -sSL -o /tmp/stb_truetype.h \
+//     https://raw.githubusercontent.com/nothings/stb/master/stb_truetype.h
+//   c++ -std=c++17 -O2 -I/tmp tools/make_font.cpp -o /tmp/make_font
+//   /tmp/make_font path/to/Roboto-Regular.ttf > src/font_atlas.h
+//
+// A distance field is used rather than a coverage bitmap so text stays sharp
+// at any size: the shader recovers the outline from the distance rather than
+// magnifying pixels.
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
+
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "stb_truetype.h"
+
+namespace {
+
+constexpr int kPixelSize = 26;   // rasterisation height; SDFs scale up from here
+constexpr int kPadding   = 4;    // distance range, in pixels
+constexpr int kOnEdge    = 128;  // value that means "exactly on the outline"
+constexpr int kAtlasW    = 256;
+
+// ASCII plus micro, which the units in the UI need.
+const int kCodepoints[] = {
+    32,  33,  34,  35,  36,  37,  38,  39,  40,  41,  42,  43,  44,  45,  46,
+    47,  48,  49,  50,  51,  52,  53,  54,  55,  56,  57,  58,  59,  60,  61,
+    62,  63,  64,  65,  66,  67,  68,  69,  70,  71,  72,  73,  74,  75,  76,
+    77,  78,  79,  80,  81,  82,  83,  84,  85,  86,  87,  88,  89,  90,  91,
+    92,  93,  94,  95,  96,  97,  98,  99,  100, 101, 102, 103, 104, 105, 106,
+    107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121,
+    122, 123, 124, 125, 126, 0xB5,
+};
+
+struct Glyph {
+    int codepoint;
+    int x = 0, y = 0, w = 0, h = 0;   // placement in the atlas
+    int xoff = 0, yoff = 0;           // offset from the pen position
+    float advance = 0.0f;
+};
+
+}  // namespace
+
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        std::fprintf(stderr, "usage: make_font <font.ttf>\n");
+        return 1;
+    }
+
+    std::FILE *f = std::fopen(argv[1], "rb");
+    if (!f) { std::fprintf(stderr, "cannot open %s\n", argv[1]); return 1; }
+    std::fseek(f, 0, SEEK_END);
+    const long size = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    std::vector<unsigned char> ttf(static_cast<size_t>(size));
+    if (std::fread(ttf.data(), 1, ttf.size(), f) != ttf.size()) return 1;
+    std::fclose(f);
+
+    stbtt_fontinfo font;
+    if (!stbtt_InitFont(&font, ttf.data(), stbtt_GetFontOffsetForIndex(ttf.data(), 0))) {
+        std::fprintf(stderr, "stbtt_InitFont failed\n");
+        return 1;
+    }
+
+    const float scale = stbtt_ScaleForPixelHeight(&font, static_cast<float>(kPixelSize));
+    int ascent = 0, descent = 0, line_gap = 0;
+    stbtt_GetFontVMetrics(&font, &ascent, &descent, &line_gap);
+
+    std::vector<Glyph> glyphs;
+    std::vector<std::vector<unsigned char>> bitmaps;
+
+    // A solid block first, so filled rectangles can share the pipeline: deep
+    // inside the field, the shader resolves it to full coverage.
+    constexpr int kBlock = 8;
+    {
+        Glyph g;
+        g.codepoint = 0;
+        g.w = kBlock;
+        g.h = kBlock;
+        glyphs.push_back(g);
+        bitmaps.emplace_back(kBlock * kBlock, 255);
+    }
+
+    for (int cp : kCodepoints) {
+        int w = 0, h = 0, xoff = 0, yoff = 0;
+        unsigned char *sdf = stbtt_GetCodepointSDF(
+            &font, scale, cp, kPadding, kOnEdge,
+            static_cast<float>(kOnEdge) / kPadding, &w, &h, &xoff, &yoff);
+
+        int advance = 0, lsb = 0;
+        stbtt_GetCodepointHMetrics(&font, cp, &advance, &lsb);
+
+        Glyph g;
+        g.codepoint = cp;
+        g.w = sdf ? w : 0;
+        g.h = sdf ? h : 0;
+        g.xoff = xoff;
+        g.yoff = yoff;
+        g.advance = static_cast<float>(advance) * scale;
+        glyphs.push_back(g);
+
+        if (sdf) {
+            bitmaps.emplace_back(sdf, sdf + static_cast<size_t>(w) * h);
+            stbtt_FreeSDF(sdf, nullptr);
+        } else {
+            bitmaps.emplace_back();  // space and the like have no outline
+        }
+    }
+
+    // Shelf packing: rows filled left to right, a new row started when full.
+    int pen_x = 0, pen_y = 0, row_h = 0;
+    for (auto &g : glyphs) {
+        if (g.w == 0) continue;
+        if (pen_x + g.w + 1 > kAtlasW) {
+            pen_x = 0;
+            pen_y += row_h + 1;
+            row_h = 0;
+        }
+        g.x = pen_x;
+        g.y = pen_y;
+        pen_x += g.w + 1;
+        if (g.h > row_h) row_h = g.h;
+    }
+    const int atlas_h = pen_y + row_h + 1;
+
+    std::vector<unsigned char> atlas(static_cast<size_t>(kAtlasW) * atlas_h, 0);
+    for (size_t i = 0; i < glyphs.size(); i++) {
+        const Glyph &g = glyphs[i];
+        for (int y = 0; y < g.h; y++) {
+            std::memcpy(&atlas[static_cast<size_t>(g.y + y) * kAtlasW + g.x],
+                        &bitmaps[i][static_cast<size_t>(y) * g.w],
+                        static_cast<size_t>(g.w));
+        }
+    }
+
+    std::printf("// Generated by tools/make_font.cpp -- do not edit.\n");
+    std::printf("//\n");
+    std::printf("// Signed distance field atlas built from Roboto Regular,\n");
+    std::printf("// Copyright the Roboto Project Authors, licensed under the\n");
+    std::printf("// Apache License 2.0.\n");
+    std::printf("#ifndef FONT_ATLAS_H\n#define FONT_ATLAS_H\n\n");
+    std::printf("#include <cstdint>\n\n");
+    std::printf("inline constexpr int kFontAtlasW = %d;\n", kAtlasW);
+    std::printf("inline constexpr int kFontAtlasH = %d;\n", atlas_h);
+    std::printf("inline constexpr float kFontPixelSize = %d.0f;\n", kPixelSize);
+    std::printf("inline constexpr float kFontPadding = %d.0f;\n", kPadding);
+    std::printf("inline constexpr float kFontAscent = %.4ff;\n",
+                static_cast<double>(ascent) * scale);
+    std::printf("inline constexpr float kFontDescent = %.4ff;\n",
+                static_cast<double>(descent) * scale);
+    std::printf("inline constexpr float kFontLineHeight = %.4ff;\n\n",
+                static_cast<double>(ascent - descent + line_gap) * scale);
+
+    std::printf("struct FontGlyph {\n");
+    std::printf("    std::uint16_t codepoint;\n");
+    std::printf("    std::uint16_t x, y, w, h;\n");
+    std::printf("    float xoff, yoff, advance;\n");
+    std::printf("};\n\n");
+
+    std::printf("// Index 0 is a solid block, used for filled rectangles.\n");
+    std::printf("inline constexpr FontGlyph kFontGlyphs[] = {\n");
+    for (const Glyph &g : glyphs) {
+        std::printf("    { %u, %d, %d, %d, %d, %.3ff, %.3ff, %.3ff },\n",
+                    static_cast<unsigned>(g.codepoint), g.x, g.y, g.w, g.h,
+                    static_cast<double>(g.xoff), static_cast<double>(g.yoff),
+                    static_cast<double>(g.advance));
+    }
+    std::printf("};\n");
+    std::printf("inline constexpr int kFontGlyphCount = %zu;\n\n", glyphs.size());
+
+    std::printf("inline constexpr std::uint8_t kFontAtlas[] = {\n");
+    for (size_t i = 0; i < atlas.size(); i++) {
+        std::printf("%s%u,", (i % 32 == 0) ? "\n" : "", atlas[i]);
+    }
+    std::printf("\n};\n\n#endif\n");
+
+    std::fprintf(stderr, "atlas %dx%d, %zu glyphs, %zu bytes\n",
+                 kAtlasW, atlas_h, glyphs.size(), atlas.size());
+    return 0;
+}

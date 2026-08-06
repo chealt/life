@@ -74,7 +74,7 @@ void text_at(const char *s, int x, int y, int h, UiColor c) {
 }
 
 bool slider(const char *label, float *value, float lo, float hi,
-            bool integral) {
+            bool integral, const char *value_text) {
     const UiRect r = row(kRowH);
     const int track_x = r.x + kLabelW;
     const int track_w = std::max(24, r.w - kLabelW - kValueW - kValueGap);
@@ -107,8 +107,9 @@ bool slider(const char *label, float *value, float lo, float hi,
     text_at(label, r.x, r.y, r.h, kText);
 
     char buf[32];
-    if (integral) std::snprintf(buf, sizeof(buf), "%d", static_cast<int>(*value));
-    else          std::snprintf(buf, sizeof(buf), "%.2f", *value);
+    if (value_text)    std::snprintf(buf, sizeof(buf), "%s", value_text);
+    else if (integral) std::snprintf(buf, sizeof(buf), "%d", static_cast<int>(*value));
+    else               std::snprintf(buf, sizeof(buf), "%.2f", *value);
     const int tw = r_text_width(buf);
     text_at(buf, r.x + r.w - tw, r.y, r.h, kMuted);
 
@@ -165,16 +166,17 @@ void ui_label(const char *text) {
     text_at(text, r.x, r.y, r.h, kText);
 }
 
-bool ui_slider_int(const char *label, int *value, int lo, int hi) {
+bool ui_slider_int(const char *label, int *value, int lo, int hi,
+                   const char *value_text) {
     float v = static_cast<float>(*value);
     const bool changed = slider(label, &v, static_cast<float>(lo),
-                                static_cast<float>(hi), true);
+                                static_cast<float>(hi), true, value_text);
     *value = static_cast<int>(v);
     return changed;
 }
 
 bool ui_slider_float(const char *label, float *value, float lo, float hi) {
-    return slider(label, value, lo, hi, false);
+    return slider(label, value, lo, hi, false, nullptr);
 }
 
 bool ui_button(const char *label) {

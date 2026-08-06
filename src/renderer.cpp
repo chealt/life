@@ -1,39 +1,31 @@
-#include <string.h>
-#include <stdlib.h>
-#include <stddef.h>
+#include <cstring>
+#include <cstddef>
+#include <cstdlib>
 
 #include "renderer.h"
-
-// microui itself is gone; its atlas is kept purely as font data, and that file
-// is written against microui's types, so the header still has to be visible.
-extern "C" {
-#include "microui.h"
-}
-
-// microui's atlas indexes its initialiser with [MU_ICON_CLOSE] = {...}, a C99
-// array designator that C++ never adopted. Clang accepts it as an extension;
-// the warning is upstream's to fix, not ours.
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wc99-designator"
-#include "atlas.inl"
-#pragma clang diagnostic pop
+#include "font_atlas.h"
 
 #define MAX_QUADS   8192
 #define MAX_BATCHES 256
 
-typedef struct {
-    float    x, y;
-    float    u, v;
-    uint32_t color;  // RGBA8, unorm
-} Vertex;
+// Text is laid out at this height in logical units. The atlas is a distance
+// field, so this is a free choice rather than the size it was baked at.
+static constexpr float kTextSize = 15.0f;
+static constexpr float kTextScale = kTextSize / kFontPixelSize;
 
-// A run of quads sharing one scissor rect. microui interleaves clip commands
-// with geometry, so we close a batch whenever the clip changes.
-typedef struct {
-    uint32_t first_index;
-    uint32_t index_count;
-    UiRect   clip;
-} Batch;
+struct Vertex {
+    float         x, y;
+    float         u, v;
+    std::uint32_t color;  // RGBA8, unorm
+};
+
+// A run of quads sharing one scissor rect; a batch closes whenever the clip
+// changes.
+struct Batch {
+    std::uint32_t first_index;
+    std::uint32_t index_count;
+    UiRect        clip;
+};
 
 static WGPUDevice          g_device;
 static WGPUQueue           g_queue;
@@ -49,6 +41,10 @@ static int    g_quad_count;
 static int    g_batch_count;
 static UiRect g_clip;
 static int    g_width, g_height, g_scale = 1;
+
+// Codepoint to glyph index. Only Latin-1 is covered, which is all the atlas
+// holds.
+static std::int16_t g_glyph_index[256];
 
 static const char *kShader =
 "struct Uniforms { screen: vec2f, _pad: vec2f };\n"
@@ -75,8 +71,13 @@ static const char *kShader =
 "\n"
 "@fragment\n"
 "fn fs(in: VSOut) -> @location(0) vec4f {\n"
-"  // The atlas is coverage-only; colour comes from the vertex.\n"
-"  return vec4f(in.color.rgb, in.color.a * textureSample(tex, samp, in.uv).r);\n"
+"  // The atlas stores distance from the outline, with 0.5 sitting exactly on\n"
+"  // it. Thresholding against the screen-space rate of change antialiases the\n"
+"  // edge at whatever size the glyph happens to be drawn.\n"
+"  let d = textureSample(tex, samp, in.uv).r;\n"
+"  let w = max(fwidth(d), 1e-4);\n"
+"  let coverage = smoothstep(0.5 - w, 0.5 + w, d);\n"
+"  return vec4f(in.color.rgb, in.color.a * coverage);\n"
 "}\n";
 
 static WGPUStringView str(const char *s) {
@@ -86,15 +87,15 @@ static WGPUStringView str(const char *s) {
     return v;
 }
 
-static int rect_eq(UiRect a, UiRect b) {
+static bool rect_eq(UiRect a, UiRect b) {
     return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
 }
 
-static WGPUTexture create_atlas_texture(void) {
+static WGPUTexture create_atlas_texture() {
     WGPUTextureDescriptor desc = {};
     desc.dimension     = WGPUTextureDimension_2D;
-    desc.size.width    = ATLAS_WIDTH;
-    desc.size.height   = ATLAS_HEIGHT;
+    desc.size.width    = kFontAtlasW;
+    desc.size.height   = kFontAtlasH;
     desc.size.depthOrArrayLayers = 1;
     desc.format        = WGPUTextureFormat_R8Unorm;
     desc.mipLevelCount = 1;
@@ -107,12 +108,12 @@ static WGPUTexture create_atlas_texture(void) {
     dst.aspect   = WGPUTextureAspect_All;
 
     WGPUTexelCopyBufferLayout layout = {};
-    layout.bytesPerRow  = ATLAS_WIDTH;
-    layout.rowsPerImage = ATLAS_HEIGHT;
+    layout.bytesPerRow  = kFontAtlasW;
+    layout.rowsPerImage = kFontAtlasH;
 
-    WGPUExtent3D extent = { ATLAS_WIDTH, ATLAS_HEIGHT, 1 };
-    wgpuQueueWriteTexture(g_queue, &dst, atlas_texture,
-                          sizeof(atlas_texture), &layout, &extent);
+    WGPUExtent3D extent = { kFontAtlasW, kFontAtlasH, 1 };
+    wgpuQueueWriteTexture(g_queue, &dst, kFontAtlas, sizeof(kFontAtlas),
+                          &layout, &extent);
     return texture;
 }
 
@@ -141,7 +142,7 @@ static void create_pipeline(WGPUTextureFormat format, WGPUTextureFormat depth_fo
     vb_layout.attributeCount = 3;
     vb_layout.attributes     = attrs;
 
-    // Straight (non-premultiplied) alpha, matching microui's colours.
+    // Straight (non-premultiplied) alpha.
     WGPUBlendState blend = {};
     blend.color.operation = WGPUBlendOperation_Add;
     blend.color.srcFactor = WGPUBlendFactor_SrcAlpha;
@@ -171,17 +172,17 @@ static void create_pipeline(WGPUTextureFormat format, WGPUTextureFormat depth_fo
     depth.stencilBack.compare  = WGPUCompareFunction_Always;
 
     WGPURenderPipelineDescriptor desc = {};
-    desc.depthStencil           = &depth;
-    desc.layout                 = NULL;  // auto layout, inferred from the shader
-    desc.vertex.module          = module;
-    desc.vertex.entryPoint      = str("vs");
-    desc.vertex.bufferCount     = 1;
-    desc.vertex.buffers         = &vb_layout;
-    desc.primitive.topology     = WGPUPrimitiveTopology_TriangleList;
-    desc.primitive.cullMode     = WGPUCullMode_None;
-    desc.multisample.count      = 1;
-    desc.multisample.mask       = 0xFFFFFFFFu;
-    desc.fragment               = &fragment;
+    desc.depthStencil       = &depth;
+    desc.layout             = nullptr;  // auto layout, inferred from the shader
+    desc.vertex.module      = module;
+    desc.vertex.entryPoint  = str("vs");
+    desc.vertex.bufferCount = 1;
+    desc.vertex.buffers     = &vb_layout;
+    desc.primitive.topology = WGPUPrimitiveTopology_TriangleList;
+    desc.primitive.cullMode = WGPUCullMode_None;
+    desc.multisample.count  = 1;
+    desc.multisample.mask   = 0xFFFFFFFFu;
+    desc.fragment           = &fragment;
 
     g_pipeline = wgpuDeviceCreateRenderPipeline(g_device, &desc);
     wgpuShaderModuleRelease(module);
@@ -192,6 +193,12 @@ void r_init(WGPUDevice device, WGPUQueue queue, WGPUTextureFormat format,
     g_device = device;
     g_queue  = queue;
 
+    for (int i = 0; i < 256; i++) g_glyph_index[i] = -1;
+    for (int i = 0; i < kFontGlyphCount; i++) {
+        const unsigned cp = kFontGlyphs[i].codepoint;
+        if (cp < 256) g_glyph_index[cp] = static_cast<std::int16_t>(i);
+    }
+
     create_pipeline(format, depth_format);
 
     WGPUBufferDescriptor vb = {};
@@ -200,16 +207,17 @@ void r_init(WGPUDevice device, WGPUQueue queue, WGPUTextureFormat format,
     g_vertex_buffer = wgpuDeviceCreateBuffer(g_device, &vb);
 
     // Every primitive is a quad, so the index buffer is fixed: build it once.
-    uint32_t *indices = (uint32_t *)malloc(MAX_QUADS * 6 * sizeof(uint32_t));
+    std::uint32_t *indices =
+        (std::uint32_t *)malloc(MAX_QUADS * 6 * sizeof(std::uint32_t));
     for (int i = 0; i < MAX_QUADS; i++) {
-        uint32_t v = (uint32_t)i * 4;
-        uint32_t *p = &indices[i * 6];
+        std::uint32_t v = (std::uint32_t)i * 4;
+        std::uint32_t *p = &indices[i * 6];
         p[0] = v; p[1] = v + 1; p[2] = v + 2;
         p[3] = v + 2; p[4] = v + 3; p[5] = v;
     }
     WGPUBufferDescriptor ib = {};
     ib.usage = WGPUBufferUsage_Index | WGPUBufferUsage_CopyDst;
-    ib.size  = MAX_QUADS * 6 * sizeof(uint32_t);
+    ib.size  = MAX_QUADS * 6 * sizeof(std::uint32_t);
     g_index_buffer = wgpuDeviceCreateBuffer(g_device, &ib);
     wgpuQueueWriteBuffer(g_queue, g_index_buffer, 0, indices, ib.size);
     free(indices);
@@ -220,15 +228,16 @@ void r_init(WGPUDevice device, WGPUQueue queue, WGPUTextureFormat format,
     g_uniform_buffer = wgpuDeviceCreateBuffer(g_device, &ub);
 
     WGPUTexture atlas_tex = create_atlas_texture();
-    WGPUTextureView atlas_view = wgpuTextureCreateView(atlas_tex, NULL);
+    WGPUTextureView atlas_view = wgpuTextureCreateView(atlas_tex, nullptr);
 
-    // Nearest filtering keeps the bitmap font crisp under integer UI scaling.
+    // Linear, unlike the old bitmap font: a distance field has to be
+    // interpolated for the reconstructed outline to come out smooth.
     WGPUSamplerDescriptor sd = {};
     sd.addressModeU = WGPUAddressMode_ClampToEdge;
     sd.addressModeV = WGPUAddressMode_ClampToEdge;
     sd.addressModeW = WGPUAddressMode_ClampToEdge;
-    sd.magFilter    = WGPUFilterMode_Nearest;
-    sd.minFilter    = WGPUFilterMode_Nearest;
+    sd.magFilter    = WGPUFilterMode_Linear;
+    sd.minFilter    = WGPUFilterMode_Linear;
     sd.mipmapFilter = WGPUMipmapFilterMode_Nearest;
     sd.maxAnisotropy = 1;
     WGPUSampler sampler = wgpuDeviceCreateSampler(g_device, &sd);
@@ -249,30 +258,23 @@ void r_init(WGPUDevice device, WGPUQueue queue, WGPUTextureFormat format,
     g_bind_group = wgpuDeviceCreateBindGroup(g_device, &bgd);
 }
 
-static void push_quad(UiRect dst, mu_Rect src, UiColor color) {
+static void push_quad(float x0, float y0, float x1, float y1,
+                      float u0, float v0, float u1, float v1, UiColor color) {
     if (g_quad_count >= MAX_QUADS) return;
 
-    Batch *b = g_batch_count > 0 ? &g_batches[g_batch_count - 1] : NULL;
-    if (b == NULL || !rect_eq(b->clip, g_clip)) {
+    Batch *b = g_batch_count > 0 ? &g_batches[g_batch_count - 1] : nullptr;
+    if (b == nullptr || !rect_eq(b->clip, g_clip)) {
         if (g_batch_count >= MAX_BATCHES) return;
         b = &g_batches[g_batch_count++];
-        b->first_index = (uint32_t)g_quad_count * 6;
+        b->first_index = (std::uint32_t)g_quad_count * 6;
         b->index_count = 0;
         b->clip = g_clip;
     }
 
-    // The atlas dimensions are unscoped enum constants; C++23 deprecates using
-    // those directly in float arithmetic, so name them as floats first.
-    constexpr float atlas_w = static_cast<float>(ATLAS_WIDTH);
-    constexpr float atlas_h = static_cast<float>(ATLAS_HEIGHT);
-    const float u0 = (float)src.x / atlas_w;
-    const float v0 = (float)src.y / atlas_h;
-    const float u1 = (float)(src.x + src.w) / atlas_w;
-    const float v1 = (float)(src.y + src.h) / atlas_h;
-    const float x0 = (float)dst.x, y0 = (float)dst.y;
-    const float x1 = (float)(dst.x + dst.w), y1 = (float)(dst.y + dst.h);
-    const uint32_t rgba = (uint32_t)color.r | ((uint32_t)color.g << 8) |
-                          ((uint32_t)color.b << 16) | ((uint32_t)color.a << 24);
+    const std::uint32_t rgba = (std::uint32_t)color.r |
+                               ((std::uint32_t)color.g << 8) |
+                               ((std::uint32_t)color.b << 16) |
+                               ((std::uint32_t)color.a << 24);
 
     Vertex *v = &g_vertices[g_quad_count * 4];
     v[0] = Vertex{ x0, y0, u0, v0, rgba };
@@ -297,23 +299,55 @@ void r_begin(int width, int height, int scale) {
 }
 
 void r_draw_rect(UiRect rect, UiColor color) {
-    push_quad(rect, atlas[ATLAS_WHITE], color);
+    // Glyph 0 is a solid block. Sampling its middle keeps the filtered edge
+    // of the block out of the result.
+    const FontGlyph &blk = kFontGlyphs[0];
+    const float u = ((float)blk.x + (float)blk.w * 0.5f) / kFontAtlasW;
+    const float v = ((float)blk.y + (float)blk.h * 0.5f) / kFontAtlasH;
+
+    push_quad((float)rect.x, (float)rect.y,
+              (float)(rect.x + rect.w), (float)(rect.y + rect.h),
+              u, v, u, v, color);
+}
+
+// Decodes one codepoint, advancing `p`. Only the one- and two-byte forms are
+// handled, which covers everything in the atlas.
+static unsigned next_codepoint(const char **p) {
+    const unsigned char *s = (const unsigned char *)*p;
+    unsigned cp = *s++;
+    if ((cp & 0xE0) == 0xC0 && (*s & 0xC0) == 0x80) {
+        cp = ((cp & 0x1F) << 6) | (*s++ & 0x3F);
+    } else if (cp >= 0x80) {
+        // Anything longer is not in the atlas; skip its continuation bytes.
+        while ((*s & 0xC0) == 0x80) s++;
+        cp = '?';
+    }
+    *p = (const char *)s;
+    return cp;
 }
 
 void r_draw_text(const char *text, int x, int y, UiColor color) {
-    UiRect dst{ x, y, 0, 0 };
-    for (const char *p = text; *p; p++) {
-        if ((*p & 0xc0) == 0x80) continue;  // UTF-8 continuation byte
-        int chr = (unsigned char)*p;
-        if (chr > 127) chr = 127;
-        mu_Rect src = atlas[ATLAS_FONT + chr];
-        dst.w = src.w;
-        dst.h = src.h;
-        push_quad(dst, src, color);
-        dst.x += dst.w;
+    float pen = (float)x;
+    const float baseline = (float)y + kFontAscent * kTextScale;
+
+    for (const char *p = text; *p; ) {
+        const unsigned cp = next_codepoint(&p);
+        const std::int16_t gi = cp < 256 ? g_glyph_index[cp] : -1;
+        if (gi < 0) continue;
+
+        const FontGlyph &g = kFontGlyphs[gi];
+        if (g.w > 0) {
+            const float x0 = pen + g.xoff * kTextScale;
+            const float y0 = baseline + g.yoff * kTextScale;
+            push_quad(x0, y0,
+                      x0 + (float)g.w * kTextScale, y0 + (float)g.h * kTextScale,
+                      (float)g.x / kFontAtlasW, (float)g.y / kFontAtlasH,
+                      (float)(g.x + g.w) / kFontAtlasW,
+                      (float)(g.y + g.h) / kFontAtlasH, color);
+        }
+        pen += g.advance * kTextScale;
     }
 }
-
 
 void r_set_clip_rect(UiRect rect) {
     g_clip = rect;
@@ -326,7 +360,7 @@ void r_end(WGPURenderPassEncoder pass) {
                          (size_t)g_quad_count * 4 * sizeof(Vertex));
 
     wgpuRenderPassEncoderSetPipeline(pass, g_pipeline);
-    wgpuRenderPassEncoderSetBindGroup(pass, 0, g_bind_group, 0, NULL);
+    wgpuRenderPassEncoderSetBindGroup(pass, 0, g_bind_group, 0, nullptr);
     wgpuRenderPassEncoderSetVertexBuffer(pass, 0, g_vertex_buffer, 0, WGPU_WHOLE_SIZE);
     wgpuRenderPassEncoderSetIndexBuffer(pass, g_index_buffer,
                                         WGPUIndexFormat_Uint32, 0, WGPU_WHOLE_SIZE);
@@ -335,8 +369,8 @@ void r_end(WGPURenderPassEncoder pass) {
         Batch *b = &g_batches[i];
         if (b->index_count == 0) continue;
 
-        // microui's unclipped rect is huge; WebGPU rejects a scissor that
-        // leaves the attachment, so clamp it to the framebuffer.
+        // WebGPU rejects a scissor that leaves the attachment, so clamp it to
+        // the framebuffer.
         int x0 = b->clip.x < 0 ? 0 : b->clip.x;
         int y0 = b->clip.y < 0 ? 0 : b->clip.y;
         int x1 = b->clip.x + b->clip.w;
@@ -347,24 +381,24 @@ void r_end(WGPURenderPassEncoder pass) {
 
         // Scissor is in framebuffer pixels, not the logical units above.
         x0 *= g_scale; y0 *= g_scale; x1 *= g_scale; y1 *= g_scale;
-        wgpuRenderPassEncoderSetScissorRect(pass, (uint32_t)x0, (uint32_t)y0,
-                                            (uint32_t)(x1 - x0), (uint32_t)(y1 - y0));
+        wgpuRenderPassEncoderSetScissorRect(pass, (std::uint32_t)x0, (std::uint32_t)y0,
+                                            (std::uint32_t)(x1 - x0),
+                                            (std::uint32_t)(y1 - y0));
         wgpuRenderPassEncoderDrawIndexed(pass, b->index_count, 1, b->first_index, 0, 0);
     }
 }
 
 int r_text_width(const char *text, int len) {
-    if (len < 0) len = (int)strlen(text);
-    int res = 0;
-    for (const char *p = text; *p && len--; p++) {
-        if ((*p & 0xc0) == 0x80) continue;
-        int chr = (unsigned char)*p;
-        if (chr > 127) chr = 127;
-        res += atlas[ATLAS_FONT + chr].w;
+    float w = 0.0f;
+    const char *end = len < 0 ? nullptr : text + len;
+    for (const char *p = text; *p && (end == nullptr || p < end); ) {
+        const unsigned cp = next_codepoint(&p);
+        const std::int16_t gi = cp < 256 ? g_glyph_index[cp] : -1;
+        if (gi >= 0) w += kFontGlyphs[gi].advance * kTextScale;
     }
-    return res;
+    return (int)(w + 0.5f);
 }
 
 int r_text_height() {
-    return 18;
+    return (int)(kFontLineHeight * kTextScale + 0.5f);
 }

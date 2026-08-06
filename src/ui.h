@@ -25,7 +25,10 @@ void ui_panel_end();
 
 void ui_category(const char *text);
 void ui_label(const char *text);
-bool ui_slider_int(const char *label, int *value, int lo, int hi);
+// `value_text` overrides the number shown on the right, for units and the
+// like; pass nullptr for the plain integer.
+bool ui_slider_int(const char *label, int *value, int lo, int hi,
+                   const char *value_text = nullptr);
 bool ui_slider_float(const char *label, float *value, float lo, float hi);
 bool ui_button(const char *label);
 

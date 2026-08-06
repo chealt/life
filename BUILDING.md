@@ -16,14 +16,16 @@ source ./emsdk_env.sh
 ## Build and run
 
 ```sh
-make deps     # clones microui into third_party/
 make serve    # builds, then serves http://localhost:8000/
 ```
 
+There is nothing to fetch first: the only third-party content is the font
+atlas, and that is generated and committed.
+
 `file://` will not work — the browser blocks the wasm fetch.
 
-Other targets: `make` builds without serving, `make clean` removes `build/`,
-and `make distclean` also removes the cloned dependency in `third_party/`.
+Other targets: `make` builds without serving and `make clean` removes
+`build/`.
 
 ## Editor setup
 
@@ -31,6 +33,24 @@ and `make distclean` also removes the cloned dependency in `third_party/`.
 target. It hardcodes the emsdk location to `~/Code/emscripten-core/emsdk`; if
 yours lives elsewhere, edit the paths there. Note that the C/C++ extension does
 not expand `~`, so paths must be absolute or use `${env:HOME}`.
+
+## Regenerating the font
+
+`src/font_atlas.h` is a signed distance field baked from Roboto Regular
+(Apache 2.0). It is committed, so this is only needed to change the typeface
+or the baked size:
+
+```sh
+curl -sSL -o /tmp/stb_truetype.h \
+  https://raw.githubusercontent.com/nothings/stb/master/stb_truetype.h
+em++ -std=c++17 -O2 -I/tmp -sNODERAWFS=1 -sENVIRONMENT=node \
+  tools/make_font.cpp -o /tmp/make_font.js
+node /tmp/make_font.js path/to/Roboto-Regular.ttf > src/font_atlas.h
+```
+
+Emscripten is used to build the tool only because the Xcode command line
+tools on this machine cannot find their own C++ headers; a working native
+`c++` would do just as well.
 
 ## Notes on the flags
 
@@ -68,6 +88,5 @@ Two more that bite on newer toolchains:
 - Linking with `emcc` fails with *emdawnwebgpu requires C++*. Everything under
   `src/` is C++ and builds with `em++`; only microui is C and builds with
   `emcc`.
-- microui has no `extern "C"` guards of its own, so including `microui.h` from
-  C++ without naming the linkage gives undefined symbols at link time.
-  `renderer.h` wraps it; include that rather than microui directly.
+- Everything under `src/` is C++ and builds with `em++`. There is no C in the
+  project any more.

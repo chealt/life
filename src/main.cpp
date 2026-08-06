@@ -49,6 +49,7 @@ static double g_last_now;  // emscripten_get_now() at the previous frame
 constexpr std::size_t kDrawBudget = 120000;
 
 static VesselParams g_vessel_params;
+static int g_vessel_length = 900;  // um, what the slider actually edits
 static std::vector<VesselSegment> g_segments;
 static std::vector<Cell> g_cells;
 static std::size_t g_true_cell_count;
@@ -199,6 +200,16 @@ static void format_grouped(std::size_t value, char *out, std::size_t cap) {
     out[w] = '\0';
 }
 
+// Micrometres up to a millimetre, then millimetres: a five-figure count of
+// microns is harder to read than the same length in mm.
+static void format_length(int micrometres, char *out, std::size_t cap) {
+    if (micrometres < 1000) {
+        std::snprintf(out, cap, "%d \xc2\xb5m", micrometres);
+    } else {
+        std::snprintf(out, cap, "%.2f mm", static_cast<double>(micrometres) / 1000.0);
+    }
+}
+
 static void build_ui(int width, int height) {
     (void)width; (void)height;
 
@@ -208,7 +219,10 @@ static void build_ui(int width, int height) {
     char buf[80];
 
     ui_category("vessel");
-    ui_slider_float("length (um)", &g_vessel_params.length, 120.0f, 4000.0f);
+    char length_text[24];
+    format_length(g_vessel_length, length_text, sizeof(length_text));
+    ui_slider_int("length", &g_vessel_length, 120, 4000, length_text);
+    g_vessel_params.length = static_cast<float>(g_vessel_length);
 
     format_grouped(g_segments.size(), count, sizeof(count));
     std::snprintf(buf, sizeof(buf), "segments   %s", count);
@@ -218,12 +232,6 @@ static void build_ui(int width, int height) {
     format_grouped(g_true_cell_count, count, sizeof(count));
     std::snprintf(buf, sizeof(buf), "number of cells   %s", count);
     ui_label(buf);
-
-    if (g_cells.size() < g_true_cell_count) {
-        format_grouped(g_cells.size(), count, sizeof(count));
-        std::snprintf(buf, sizeof(buf), "drawn   %s", count);
-        ui_label(buf);
-    }
 
     if (ui_button("reset view")) {
         g_camera = Camera{};

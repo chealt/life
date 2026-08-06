@@ -1,13 +1,12 @@
 EMCC   ?= emcc
 EMXX   ?= em++
-MICROUI = third_party/microui
 BUILD  ?= build
 PORT   ?= 8000
 
 OBJECTS = $(BUILD)/main.o $(BUILD)/renderer.o $(BUILD)/cells.o \
           $(BUILD)/vessel.o $(BUILD)/ui.o
 
-INCLUDES = -I$(MICROUI)/src -I$(MICROUI)/demo -Isrc
+INCLUDES = -Isrc
 
 COMMON = $(INCLUDES) -Os -msimd128 --use-port=emdawnwebgpu
 
@@ -22,25 +21,18 @@ LDFLAGS = \
 	-Os --closure 0 \
 	--shell-file src/shell.html
 
-.PHONY: all deps serve clean distclean
+.PHONY: all serve clean
 
 all: $(BUILD)/index.html
-
-deps: $(MICROUI)/src/microui.c
-
-$(MICROUI)/src/microui.c:
-	git clone --depth 1 https://github.com/rxi/microui $(MICROUI)
 
 $(BUILD)/index.html: $(OBJECTS) src/shell.html
 	$(EMXX) $(OBJECTS) $(LDFLAGS) -o $@
 
 $(BUILD)/main.o: src/main.cpp src/renderer.h src/cells.h src/vessel.h src/ui.h \
-                 src/camera.h src/math3d.h $(MICROUI)/src/microui.c | $(BUILD)
+                 src/camera.h src/math3d.h | $(BUILD)
 	$(EMXX) $(CXXFLAGS) -c $< -o $@
 
-# Depends on microui.c only -- the clone produces atlas.inl at the same time,
-# and the atlas is the sole remaining use of that dependency.
-$(BUILD)/renderer.o: src/renderer.cpp src/renderer.h $(MICROUI)/src/microui.c | $(BUILD)
+$(BUILD)/renderer.o: src/renderer.cpp src/renderer.h src/font_atlas.h | $(BUILD)
 	$(EMXX) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD)/cells.o: src/cells.cpp src/cells.h src/math3d.h | $(BUILD)
@@ -61,6 +53,3 @@ serve: all
 
 clean:
 	rm -rf $(BUILD)
-
-distclean: clean
-	rm -rf third_party
