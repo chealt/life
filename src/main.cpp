@@ -184,19 +184,34 @@ static bool on_touch(int type, const EmscriptenTouchEvent *e, void *ud) {
 
 /* ------------------------------------------------------------------- ui -- */
 
+// Groups digits in threes: six-figure counts are unreadable otherwise.
+static void format_grouped(std::size_t value, char *out, std::size_t cap) {
+    char digits[24];
+    const int n = std::snprintf(digits, sizeof(digits), "%zu", value);
+
+    std::size_t w = 0;
+    for (int i = 0; i < n && w + 2 < cap; i++) {
+        if (i > 0 && (n - i) % 3 == 0) out[w++] = ' ';
+        out[w++] = digits[i];
+    }
+    out[w] = '\0';
+}
+
 static void build_ui(int width, int height) {
     (void)width; (void)height;
 
-    ui_panel_begin("life", 24, 24, 300);
+    ui_panel_begin("controls", 24, 24, 320);
 
-    ui_category("blood");
+    ui_category("cells");
     ui_slider_int("red blood cells", &g_field_params.per_chunk, 0, 200);
 
     ui_category("view");
     ui_slider_float("range", &g_view_range, 400.0f, 6000.0f);
 
+    char count[32];
+    format_grouped(g_cells.size(), count, sizeof(count));
     char buf[64];
-    std::snprintf(buf, sizeof(buf), "drawn  %zu", g_cells.size());
+    std::snprintf(buf, sizeof(buf), "number of cells   %s", count);
     ui_label(buf);
 
     if (ui_button("reset view")) {
@@ -305,7 +320,11 @@ static void frame() {
     WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc);
     // Cells first: r_end sets scissor rects, and they persist for the rest of
     // the pass. The UI draws on top.
-    cells_draw(pass, g_camera.view_proj(aspect), g_camera.eye(), g_cells);
+    // The billboard the cell is traced inside is oriented by the camera.
+    const Vec3 cam_right = g_camera.right();
+    const Vec3 cam_up = cross(g_camera.forward(), cam_right);
+    cells_draw(pass, g_camera.view_proj(aspect), g_camera.eye(),
+               cam_right, cam_up, g_cells);
     r_end(pass);
     wgpuRenderPassEncoderEnd(pass);
 

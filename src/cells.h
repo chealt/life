@@ -29,7 +29,9 @@ struct Cell {
 void cells_init(WGPUDevice device, WGPUQueue queue, WGPUTextureFormat format,
                 WGPUTextureFormat depth_format);
 
+// cam_right and cam_up orient the billboard the cell is traced inside.
 void cells_draw(WGPURenderPassEncoder pass, const Mat4 &view_proj,
-                const Vec3 &eye, std::span<const Cell> cells);
+                const Vec3 &eye, const Vec3 &cam_right, const Vec3 &cam_up,
+                std::span<const Cell> cells);
 
 #endif

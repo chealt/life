@@ -29,6 +29,10 @@ constexpr int kGap      = 6;
 constexpr int kTitleH   = 34;
 constexpr int kLabelW   = 104;
 constexpr int kKnobW    = 10;
+// The value is right-aligned in a reserved column. Without this the number
+// grows leftwards over the track as it gets wider.
+constexpr int kValueW   = 58;
+constexpr int kValueGap = 8;
 
 struct State {
     UiInput input;
@@ -73,7 +77,7 @@ bool slider(const char *label, float *value, float lo, float hi,
             bool integral) {
     const UiRect r = row(kRowH);
     const int track_x = r.x + kLabelW;
-    const int track_w = std::max(24, r.w - kLabelW);
+    const int track_w = std::max(24, r.w - kLabelW - kValueW - kValueGap);
 
     const bool over = hit(track_x, r.y, track_w, r.h);
     if (over && g.input.mouse_pressed) g.active = label;
@@ -106,7 +110,7 @@ bool slider(const char *label, float *value, float lo, float hi,
     if (integral) std::snprintf(buf, sizeof(buf), "%d", static_cast<int>(*value));
     else          std::snprintf(buf, sizeof(buf), "%.2f", *value);
     const int tw = r_text_width(buf);
-    text_at(buf, track_x + track_w - tw, r.y, r.h, kMuted);
+    text_at(buf, r.x + r.w - tw, r.y, r.h, kMuted);
 
     return changed;
 }
