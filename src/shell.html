@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>life</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #17171b; overflow: hidden; }
+  #canvas { display: block; width: 100vw; height: 100vh; outline: none; }
+  #error {
+    position: fixed; inset: 0; display: none; place-content: center; text-align: center;
+    font: 15px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; color: #e8e8ea; padding: 2rem;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="canvas" tabindex="0"></canvas>
+<div id="error"></div>
+
+<script>
+  const canvas = document.getElementById('canvas');
+
+  // Keep the drawing buffer at CSS size * devicePixelRatio. GLFW reads this
+  // back as the framebuffer size, and the C++ side reconfigures the surface.
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+    const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // Let microui own the right-click and keep the canvas focused for keyboard input.
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  canvas.addEventListener('mousedown', () => canvas.focus());
+  canvas.focus();
+
+  if (!navigator.gpu) {
+    const el = document.getElementById('error');
+    el.style.display = 'grid';
+    el.textContent = 'WebGPU is not available in this browser. Try current Chrome or Edge, and make sure you are on http://localhost (a secure context).';
+  }
+
+  var Module = {
+    canvas: canvas,
+    print: (text) => console.log(text),
+    printErr: (text) => console.error(text),
+  };
+</script>
+
+{{{ SCRIPT }}}
+
+</body>
+</html>
