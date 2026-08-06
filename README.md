@@ -1,33 +1,32 @@
 # life
 
-Immediate-mode UI in the browser: microui on WebGPU, compiled with Emscripten.
+A game-like interface for simulating the human body and its processes.
+
+The aim is to model organs and systems — and the interactions between them — as
+something continuously running and directly manipulable, rather than a set of
+charts that redraw when you change an input.
+
+Everything runs in the browser, compiled to WebAssembly.
+
+> **Status: foundation only.** What exists today is the rendering and UI
+> substrate described below. The simulation itself is not written yet.
+
+See [BUILDING.md](BUILDING.md) for requirements, build, and run instructions.
+
+## The stack
+
+Immediate-mode UI via [microui](https://github.com/rxi/microui), drawn with
+WebGPU, compiled with Emscripten.
 
 All the application code is C. microui is ~1100 lines; the WebGPU backend in
 `src/renderer.c` is the other half of the stack. The link step goes through
 `em++` because `emdawnwebgpu` implements the `webgpu.h` C API in C++ — the
 sources themselves still compile as C99.
 
-## Requirements
-
-- Emscripten **4.0.10 or newer** — the first release vendoring the
-  `emdawnwebgpu` port. The older `-sUSE_WEBGPU` is deprecated and its API does
-  not match this code.
-- A WebGPU browser (current Chrome or Edge), served over `localhost`.
-
-```sh
-git clone https://github.com/emscripten-core/emsdk
-cd emsdk && ./emsdk install latest && ./emsdk activate latest
-source ./emsdk_env.sh
-```
-
-## Build and run
-
-```sh
-make deps     # clones microui into third_party/
-make serve    # builds, then serves http://localhost:8000/
-```
-
-`file://` will not work — the browser blocks the wasm fetch.
+microui's role is the control panel — sliders, toggles, readouts. It is a
+widget toolkit whose every primitive is a quad from a bitmap atlas, so the
+simulation's visuals will need their own render pass rather than being pushed
+through microui's command list.
 
 ## Layout
 
@@ -64,37 +63,3 @@ Typical frame: **one pipeline, one bind group, a handful of draw calls.**
 logical units and the shader maps them to the full-resolution framebuffer, with
 a **nearest-neighbour** sampler so the bitmap font stays crisp rather than soft.
 Scissor rects are converted back to framebuffer pixels in `r_end`.
-
-## Notes on the flags
-
-- `--use-port=emdawnwebgpu` on **both** compile and link.
-- No `-sASYNCIFY`. Adapter and device are requested via callbacks; the main loop
-  starts once the device exists.
-- `emscripten_set_main_loop(frame, 0, 0)` — the `0` means "drive off
-  `requestAnimationFrame`", so it tracks 120Hz displays instead of pinning 60.
-- `-Os` over `-O2`: this is UI, not a hot inner loop, and size is the point.
-- No GLFW port. Input comes from `emscripten/html5.h` directly.
-
-## If it doesn't compile
-
-The WebGPU C API churned through 2024–2025. The likely culprits, all in
-`renderer.c` and `main.c`:
-
-| Current name | Older name |
-|---|---|
-| `WGPUTexelCopyTextureInfo` | `WGPUImageCopyTexture` |
-| `WGPUTexelCopyBufferLayout` | `WGPUTextureDataLayout` |
-| `WGPUShaderSourceWGSL` | `WGPUShaderModuleWGSLDescriptor` |
-| `WGPUEmscriptenSurfaceSourceCanvasHTMLSelector` | `WGPUSurfaceDescriptorFromCanvasHTMLSelector` |
-
-Callbacks also gained a second `void*` userdata and `WGPUStringView` replaced
-`const char*`. Check `webgpu.h` in your active emsdk if a symbol is missing.
-
-Two more that bite on newer toolchains:
-
-- `emscripten/html5.h` callbacks return `bool`, not the old `EM_BOOL`/`int`.
-  A mismatch shows up as *incompatible function pointer types* at every
-  `emscripten_set_*_callback` call.
-- Linking with `emcc` fails with *emdawnwebgpu requires C++*. The Makefile
-  compiles with `emcc` and links with `em++`; `emcc -sDEFAULT_TO_CXX` also
-  works but compiles the `.c` files as C++.
