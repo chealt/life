@@ -86,7 +86,4 @@ Two more that bite on newer toolchains:
   A mismatch shows up as *incompatible function pointer types* at every
   `emscripten_set_*_callback` call.
 - Linking with `emcc` fails with *emdawnwebgpu requires C++*. Everything under
-  `src/` is C++ and builds with `em++`; only microui is C and builds with
-  `emcc`.
-- Everything under `src/` is C++ and builds with `em++`. There is no C in the
-  project any more.
+  `src/` is C++ and builds with `em++`; there is no C left in the project.
