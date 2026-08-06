@@ -46,6 +46,7 @@ struct Branch {
     Vec3   dir;
     Vec3   frame;  // reference direction perpendicular to dir
     float  radius;
+    float  from_radius;  // parent's calibre, tapered away over the first step
     double budget;  // um still to run, double because it spans body scale
     int    depth;
     std::uint32_t seed;
@@ -60,12 +61,16 @@ struct Instance {
     float ra;
     float bx, by, bz;
     float rb;
-    float uax, uay, uaz;
+    float nax, nay, naz;
     float _pad0;
-    float ubx, uby, ubz;
+    float nbx, nby, nbz;
     float _pad1;
+    float uax, uay, uaz;
+    float _pad2;
+    float ubx, uby, ubz;
+    float _pad3;
 };
-static_assert(sizeof(Instance) == 64, "instance stride is baked into the layout");
+static_assert(sizeof(Instance) == 96, "instance stride is baked into the layout");
 
 WGPUDevice         g_device;
 WGPUQueue          g_queue;
@@ -102,17 +107,24 @@ const char *kShader =
 "      @location(3) b: vec3f,\n"
 "      @location(4) rb: f32,\n"
 "      @location(5) ua: vec3f,\n"
-"      @location(6) ub: vec3f) -> VSOut {\n"
-"  let axis = normalize(b - a);\n"
-"  let t = ring.z;\n"
-"  // The frame comes from the branch, so the ring lines up with the one in\n"
-"  // the neighbouring segment and the tube stays seamless.\n"
-"  let uf = normalize(mix(ua, ub, t));\n"
-"  let bu = normalize(uf - axis * dot(uf, axis));\n"
-"  let bv = cross(axis, bu);\n"
+"      @location(6) ub: vec3f,\n"
+"      @location(7) na: vec3f,\n"
+"      @location(8) nb: vec3f) -> VSOut {\n"
+"  // Ring vertices only ever sit at one end or the other, so nothing here is\n"
+"  // interpolated along the segment: each end is placed in its own mitre\n"
+"  // plane. Both segments meeting at a node compute the same plane and the\n"
+"  // same frame, so they produce identical vertices and the tube is one\n"
+"  // continuous surface rather than two overlapping cylinders.\n"
+"  let at_start = ring.z < 0.5;\n"
+"  let centre = select(b, a, at_start);\n"
+"  let radius = select(rb, ra, at_start);\n"
+"  let plane = normalize(select(nb, na, at_start));\n"
+"  let uf = select(ub, ua, at_start);\n"
+"\n"
+"  let bu = normalize(uf - plane * dot(uf, plane));\n"
+"  let bv = cross(plane, bu);\n"
 "  let radial = bu * ring.x + bv * ring.y;\n"
-"  let centre = mix(a, b, t);\n"
-"  let world = centre + radial * mix(ra, rb, t);\n"
+"  let world = centre + radial * radius;\n"
 "\n"
 "  var out: VSOut;\n"
 "  out.pos = u.view_proj * vec4f(world, 1.0);\n"
@@ -155,7 +167,7 @@ void create_pipeline(WGPUTextureFormat format, WGPUTextureFormat depth_format) {
     ring_attr.offset = 0;
     ring_attr.shaderLocation = 0;
 
-    std::array<WGPUVertexAttribute, 6> inst{};
+    std::array<WGPUVertexAttribute, 8> inst{};
     inst[0].format = WGPUVertexFormat_Float32x3;
     inst[0].offset = offsetof(Instance, ax);
     inst[0].shaderLocation = 1;
@@ -174,6 +186,12 @@ void create_pipeline(WGPUTextureFormat format, WGPUTextureFormat depth_format) {
     inst[5].format = WGPUVertexFormat_Float32x3;
     inst[5].offset = offsetof(Instance, ubx);
     inst[5].shaderLocation = 6;
+    inst[6].format = WGPUVertexFormat_Float32x3;
+    inst[6].offset = offsetof(Instance, nax);
+    inst[6].shaderLocation = 7;
+    inst[7].format = WGPUVertexFormat_Float32x3;
+    inst[7].offset = offsetof(Instance, nbx);
+    inst[7].shaderLocation = 8;
 
     std::array<WGPUVertexBufferLayout, 2> layouts{};
     layouts[0].arrayStride    = sizeof(float) * 3;
@@ -238,10 +256,13 @@ VesselStats vessel_build(const VesselParams &params, std::vector<VesselSegment> 
     VesselStats stats;
     stats.requested_length = std::max(params.length, static_cast<double>(kStep));
 
+    std::vector<Vec3> nodes, dirs, frames;
+
     std::vector<Branch> stack;
     stack.push_back(Branch{ Vec3{ 0.0f, 0.0f, 0.0f }, Vec3{ 0.0f, 0.0f, 1.0f },
                             Vec3{ 1.0f, 0.0f, 0.0f },
-                            kTrunkRadius, stats.requested_length, 0, 0x5EEDu });
+                            kTrunkRadius, kTrunkRadius,
+                            stats.requested_length, 0, 0x5EEDu });
 
     // Breadth first. Depth first would spend the whole segment budget running
     // one branch to its end, leaving the rest of the tree unbuilt -- so a
@@ -253,7 +274,17 @@ VesselStats vessel_build(const VesselParams &params, std::vector<VesselSegment> 
         Rng rng{ b.seed | 1u };
         float run = 0.0f;  // distance this branch has covered since it started
 
-        while (b.budget > 0.0 && out.size() < kMaxSegments) {
+        // The run is collected as a polyline and only turned into segments at
+        // the end, because the ring at a node depends on the directions of
+        // *both* segments meeting there.
+        nodes.clear();
+        dirs.clear();
+        frames.clear();
+        nodes.push_back(b.pos);
+        frames.push_back(b.frame);
+        const Vec3 dir_in = b.dir;
+
+        while (b.budget > 0.0 && out.size() + dirs.size() < kMaxSegments) {
             const float step = static_cast<float>(std::min<double>(kStep, b.budget));
 
             // A gentle wander, so vessels do not look like drawn diagrams,
@@ -262,7 +293,6 @@ VesselStats vessel_build(const VesselParams &params, std::vector<VesselSegment> 
             // wander freely, though nothing here strictly prevents it.
             Vec3 su, sv;
             basis_from_axis(b.dir, su, sv);
-            const Vec3 frame_in = b.frame;
 
             Vec3 outward{ b.pos.x, b.pos.y, 0.0f };
             const float spread = std::sqrt(dot(outward, outward));
@@ -278,8 +308,10 @@ VesselStats vessel_build(const VesselParams &params, std::vector<VesselSegment> 
             b.frame = normalize(b.frame - b.dir * dot(b.frame, b.dir));
 
             const Vec3 next = b.pos + b.dir * step;
-            out.push_back(VesselSegment{ b.pos, next, b.radius, b.radius,
-                                         frame_in, b.frame });
+            dirs.push_back(b.dir);
+            nodes.push_back(next);
+            frames.push_back(b.frame);
+
             b.pos = next;
             b.budget -= step;
             run += step;
@@ -296,6 +328,7 @@ VesselStats vessel_build(const VesselParams &params, std::vector<VesselSegment> 
                 // which is why the tree used to vanish at long lengths.
                 if (b.budget > 0.0) {
                     b.seed = rng.next();
+                    b.from_radius = b.radius;  // already at calibre
                     stack.push_back(b);
                 }
                 break;
@@ -316,14 +349,35 @@ VesselStats vessel_build(const VesselParams &params, std::vector<VesselSegment> 
                 const double half = b.budget * 0.5;
                 const Vec3 d0 = rotate_toward(b.dir, side, angle);
                 const Vec3 d1 = rotate_toward(b.dir, side, -angle);
+                // Children start at the parent's calibre and narrow over their
+                // first step, so a fork reads as a vessel dividing rather than
+                // a thin tube poking out of a fat one.
                 stack.push_back(Branch{ b.pos, d0,
                                         normalize(b.frame - d0 * dot(b.frame, d0)),
-                                        child_r, half, b.depth + 1, rng.next() });
+                                        child_r, b.radius, half, b.depth + 1,
+                                        rng.next() });
                 stack.push_back(Branch{ b.pos, d1,
                                         normalize(b.frame - d1 * dot(b.frame, d1)),
-                                        child_r, half, b.depth + 1, rng.next() });
+                                        child_r, b.radius, half, b.depth + 1,
+                                        rng.next() });
                 break;
             }
+        }
+
+        // Emit the run. Each node gets one ring, lying in the plane that
+        // bisects the two segments meeting there -- a mitre joint. Both
+        // segments then generate the identical ring, so the surface is
+        // continuous instead of two tubes shoved into one another.
+        for (std::size_t i = 0; i < dirs.size(); i++) {
+            const Vec3 d = dirs[i];
+            const Vec3 prev = (i == 0) ? dir_in : dirs[i - 1];
+            const Vec3 next_d = (i + 1 < dirs.size()) ? dirs[i + 1] : d;
+
+            const float ra = (i == 0) ? b.from_radius : b.radius;
+            out.push_back(VesselSegment{ nodes[i], nodes[i + 1],
+                                         ra, b.radius,
+                                         normalize(prev + d), normalize(d + next_d),
+                                         frames[i], frames[i + 1] });
         }
     }
 
@@ -501,6 +555,8 @@ void vessel_draw(WGPURenderPassEncoder pass, const Mat4 &view_proj,
     for (const VesselSegment &s : segments) {
         g_instances.push_back(Instance{ s.a.x, s.a.y, s.a.z, s.ra,
                                         s.b.x, s.b.y, s.b.z, s.rb,
+                                        s.na.x, s.na.y, s.na.z, 0.0f,
+                                        s.nb.x, s.nb.y, s.nb.z, 0.0f,
                                         s.ua.x, s.ua.y, s.ua.z, 0.0f,
                                         s.ub.x, s.ub.y, s.ub.z, 0.0f });
     }

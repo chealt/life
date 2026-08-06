@@ -31,6 +31,10 @@ inline constexpr float kCapillaryRadius = 5.0f;   // um
 struct VesselSegment {
     Vec3  a{}, b{};
     float ra = 0.0f, rb = 0.0f;
+    // Normal of the plane the ring lies in at each end -- the bisector of the
+    // two segments meeting there, so neighbours produce the same ring and the
+    // tube has no seam.
+    Vec3  na{ 0.0f, 0.0f, 1.0f }, nb{ 0.0f, 0.0f, 1.0f };
     // The ring's reference direction at each end. Carried along the branch so
     // consecutive segments agree at the joint they share; deriving it from the
     // axis instead makes the tube twist and crease where the axis turns.
