@@ -49,7 +49,8 @@ static double g_last_now;  // emscripten_get_now() at the previous frame
 constexpr std::size_t kDrawBudget = 120000;
 
 static VesselParams g_vessel_params;
-static int g_vessel_length = 900;  // um, what the slider actually edits
+static double g_vessel_length = 900.0;  // um, what the slider edits
+static VesselStats g_vessel_stats;
 static std::vector<VesselSegment> g_segments;
 static std::vector<Cell> g_cells;
 static std::size_t g_true_cell_count;
@@ -200,14 +201,19 @@ static void format_grouped(std::size_t value, char *out, std::size_t cap) {
     out[w] = '\0';
 }
 
-// Micrometres up to a millimetre, then millimetres: a five-figure count of
-// microns is harder to read than the same length in mm.
-static void format_length(int micrometres, char *out, std::size_t cap) {
-    if (micrometres < 1000) {
-        std::snprintf(out, cap, "%d \xc2\xb5m", micrometres);
-    } else {
-        std::snprintf(out, cap, "%.2f mm", static_cast<double>(micrometres) / 1000.0);
-    }
+// Steps up through the SI prefixes as the vessel grows, so the number stays
+// short: a length in micrometres is unreadable once it reaches the metre range.
+static void format_length(double micrometres, char *out, std::size_t cap) {
+    const char *unit = "\xc2\xb5m";
+    double v = micrometres;
+    if (v >= 1.0e9)      { v /= 1.0e9; unit = "km"; }
+    else if (v >= 1.0e6) { v /= 1.0e6; unit = "m"; }
+    else if (v >= 1.0e3) { v /= 1.0e3; unit = "mm"; }
+
+    // Three significant figures, so the value reads as a whole number wherever
+    // it can.
+    const char *fmt = v >= 100.0 ? "%.0f %s" : (v >= 10.0 ? "%.1f %s" : "%.2f %s");
+    std::snprintf(out, cap, fmt, v, unit);
 }
 
 static void build_ui(int width, int height) {
@@ -221,8 +227,8 @@ static void build_ui(int width, int height) {
     ui_category("vessel");
     char length_text[24];
     format_length(g_vessel_length, length_text, sizeof(length_text));
-    ui_slider_int("length", &g_vessel_length, 120, 4000, length_text);
-    g_vessel_params.length = static_cast<float>(g_vessel_length);
+    ui_slider_log("length", &g_vessel_length, 120.0, kBodyVesselLength, length_text);
+    g_vessel_params.length = g_vessel_length;
 
     format_grouped(g_segments.size(), count, sizeof(count));
     std::snprintf(buf, sizeof(buf), "segments   %s", count);
@@ -235,8 +241,8 @@ static void build_ui(int width, int height) {
 
     if (ui_button("reset view")) {
         g_camera = Camera{};
-        g_camera.distance = g_vessel_params.length * 0.9f;
-        g_camera.target = Vec3{ 0.0f, 0.0f, g_vessel_params.length * 0.35f };
+        g_camera.distance = static_cast<float>(g_vessel_stats.built_length) * 0.25f;
+        g_camera.target = Vec3{ 0.0f, 0.0f, 0.0f };
     }
 
     ui_panel_end();
@@ -301,8 +307,8 @@ static void frame() {
 
     // The vessel is regenerated from its length each frame: it is cheap, and
     // it keeps the length control immediate.
-    vessel_build(g_vessel_params, g_segments);
-    g_true_cell_count = vessel_red_cell_count(g_segments);
+    g_vessel_stats = vessel_build(g_vessel_params, g_segments);
+    g_true_cell_count = static_cast<std::size_t>(g_vessel_stats.true_cells);
     vessel_fill(g_segments, kDrawBudget, g_cells);
 
     ui_begin(g_ui_input, logical_w, logical_h);
@@ -372,8 +378,9 @@ static void start() {
     vessel_init(g_device, g_queue, kSurfaceFormat, kDepthFormat);
 
     // Frame the vessel rather than starting inside it.
-    g_camera.distance = g_vessel_params.length * 0.9f;
-    g_camera.target = Vec3{ 0.0f, 0.0f, g_vessel_params.length * 0.35f };
+    g_camera.distance = static_cast<float>(g_vessel_params.length) * 0.9f;
+    g_camera.target = Vec3{ 0.0f, 0.0f,
+                            static_cast<float>(g_vessel_params.length) * 0.35f };
 
     emscripten_set_mousemove_callback(CANVAS, nullptr, 0, on_mouse);
     emscripten_set_mousedown_callback(CANVAS, nullptr, 0, on_mouse);

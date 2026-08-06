@@ -179,6 +179,17 @@ bool ui_slider_float(const char *label, float *value, float lo, float hi) {
     return slider(label, value, lo, hi, false, nullptr);
 }
 
+bool ui_slider_log(const char *label, double *value, double lo, double hi,
+                   const char *value_text) {
+    const double span = std::log(hi / lo);
+    float t = static_cast<float>(std::log(*value / lo) / span);
+
+    float shown = t;
+    const bool dragged = slider(label, &shown, 0.0f, 1.0f, false, value_text);
+    if (dragged) *value = lo * std::exp(static_cast<double>(shown) * span);
+    return dragged;
+}
+
 bool ui_button(const char *label) {
     const UiRect r = row(kRowH + 4);
     const bool over = hit(r.x, r.y, r.w, r.h);

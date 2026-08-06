@@ -27,15 +27,37 @@ inline constexpr float kCapillaryRadius = 3.5f;   // um
 struct VesselSegment {
     Vec3  a{}, b{};
     float ra = 0.0f, rb = 0.0f;
+    // The ring's reference direction at each end. Carried along the branch so
+    // consecutive segments agree at the joint they share; deriving it from the
+    // axis instead makes the tube twist and crease where the axis turns.
+    Vec3  ua{ 1.0f, 0.0f, 0.0f }, ub{ 1.0f, 0.0f, 0.0f };
 };
 
+// Total length of every branch added together, in micrometres. All the
+// vessels in an adult laid end to end come to roughly 100 000 km, which is
+// where the upper limit comes from.
+inline constexpr double kBodyVesselLength = 1.0e14;  // um
+
+// A micrometre of capillary holds this many red cells. Capillaries are most
+// of the body's vessel length, so this is what the total scales by.
+inline constexpr double kCapillaryCellsPerUm =
+    3.14159265 * kCapillaryRadius * kCapillaryRadius * kHaematocrit / kRedCellVolume;
+
 struct VesselParams {
-    float length = 900.0f;  // um, along the trunk before branching is counted
+    double length = 900.0;  // um, summed over every branch
+};
+
+struct VesselStats {
+    double requested_length = 0.0;  // um
+    double built_length = 0.0;      // um actually turned into geometry
+    double true_cells = 0.0;        // red cells the requested length would hold
 };
 
 // Builds the vessel tree. Longer vessels fork more, because a branch divides
-// once it has run for a set distance.
-void vessel_build(const VesselParams &params, std::vector<VesselSegment> &out);
+// once it has run for a set distance and shares what is left with its
+// children. Only so much geometry is generated; past that the returned stats
+// account for the remainder rather than building it.
+VesselStats vessel_build(const VesselParams &params, std::vector<VesselSegment> &out);
 
 // Total lumen volume, in um^3.
 float vessel_volume(std::span<const VesselSegment> segments);

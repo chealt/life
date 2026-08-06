@@ -30,6 +30,10 @@ void ui_label(const char *text);
 bool ui_slider_int(const char *label, int *value, int lo, int hi,
                    const char *value_text = nullptr);
 bool ui_slider_float(const char *label, float *value, float lo, float hi);
+// Logarithmic, for ranges spanning orders of magnitude where a linear track
+// would leave everything but the top end unreachable.
+bool ui_slider_log(const char *label, double *value, double lo, double hi,
+                   const char *value_text = nullptr);
 bool ui_button(const char *label);
 
 #endif

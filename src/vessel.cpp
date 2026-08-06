@@ -14,7 +14,7 @@ constexpr float kPi = 3.14159265f;
 constexpr float kForkInterval = 320.0f;  // um
 constexpr float kStep         = 40.0f;   // um per segment, sets how smoothly it curves
 constexpr int   kMaxDepth     = 7;
-constexpr std::size_t kMaxSegments = 20000;
+constexpr std::size_t kMaxSegments = 30000;
 
 // Murray's law: a parent's cube radius is shared between its children, which
 // for a symmetric fork means each child is 2^(-1/3) of the parent.
@@ -42,25 +42,30 @@ Vec3 rotate_toward(const Vec3 &dir, const Vec3 &side, float angle) {
 }
 
 struct Branch {
-    Vec3  pos;
-    Vec3  dir;
-    float radius;
-    float budget;  // um still to run
-    int   depth;
+    Vec3   pos;
+    Vec3   dir;
+    Vec3   frame;  // reference direction perpendicular to dir
+    float  radius;
+    double budget;  // um still to run, double because it spans body scale
+    int    depth;
     std::uint32_t seed;
 };
 
 /* ---------------------------------------------------------- rendering -- */
 
-constexpr int kRings = 14;  // sides around the tube
+constexpr int kRings = 24;  // sides around the tube
 
 struct Instance {
     float ax, ay, az;
     float ra;
     float bx, by, bz;
     float rb;
+    float uax, uay, uaz;
+    float _pad0;
+    float ubx, uby, ubz;
+    float _pad1;
 };
-static_assert(sizeof(Instance) == 32, "instance stride is baked into the layout");
+static_assert(sizeof(Instance) == 64, "instance stride is baked into the layout");
 
 WGPUDevice         g_device;
 WGPUQueue          g_queue;
@@ -95,14 +100,16 @@ const char *kShader =
 "      @location(1) a: vec3f,\n"
 "      @location(2) ra: f32,\n"
 "      @location(3) b: vec3f,\n"
-"      @location(4) rb: f32) -> VSOut {\n"
+"      @location(4) rb: f32,\n"
+"      @location(5) ua: vec3f,\n"
+"      @location(6) ub: vec3f) -> VSOut {\n"
 "  let axis = normalize(b - a);\n"
-"  var helper = vec3f(0.0, 1.0, 0.0);\n"
-"  if (abs(axis.y) > 0.9) { helper = vec3f(1.0, 0.0, 0.0); }\n"
-"  let bu = normalize(cross(helper, axis));\n"
-"  let bv = cross(axis, bu);\n"
-"\n"
 "  let t = ring.z;\n"
+"  // The frame comes from the branch, so the ring lines up with the one in\n"
+"  // the neighbouring segment and the tube stays seamless.\n"
+"  let uf = normalize(mix(ua, ub, t));\n"
+"  let bu = normalize(uf - axis * dot(uf, axis));\n"
+"  let bv = cross(axis, bu);\n"
 "  let radial = bu * ring.x + bv * ring.y;\n"
 "  let centre = mix(a, b, t);\n"
 "  let world = centre + radial * mix(ra, rb, t);\n"
@@ -148,7 +155,7 @@ void create_pipeline(WGPUTextureFormat format, WGPUTextureFormat depth_format) {
     ring_attr.offset = 0;
     ring_attr.shaderLocation = 0;
 
-    std::array<WGPUVertexAttribute, 4> inst{};
+    std::array<WGPUVertexAttribute, 6> inst{};
     inst[0].format = WGPUVertexFormat_Float32x3;
     inst[0].offset = offsetof(Instance, ax);
     inst[0].shaderLocation = 1;
@@ -161,6 +168,12 @@ void create_pipeline(WGPUTextureFormat format, WGPUTextureFormat depth_format) {
     inst[3].format = WGPUVertexFormat_Float32;
     inst[3].offset = offsetof(Instance, rb);
     inst[3].shaderLocation = 4;
+    inst[4].format = WGPUVertexFormat_Float32x3;
+    inst[4].offset = offsetof(Instance, uax);
+    inst[4].shaderLocation = 5;
+    inst[5].format = WGPUVertexFormat_Float32x3;
+    inst[5].offset = offsetof(Instance, ubx);
+    inst[5].shaderLocation = 6;
 
     std::array<WGPUVertexBufferLayout, 2> layouts{};
     layouts[0].arrayStride    = sizeof(float) * 3;
@@ -219,13 +232,16 @@ void create_pipeline(WGPUTextureFormat format, WGPUTextureFormat depth_format) {
 
 }  // namespace
 
-void vessel_build(const VesselParams &params, std::vector<VesselSegment> &out) {
+VesselStats vessel_build(const VesselParams &params, std::vector<VesselSegment> &out) {
     out.clear();
+
+    VesselStats stats;
+    stats.requested_length = std::max(params.length, static_cast<double>(kStep));
 
     std::vector<Branch> stack;
     stack.push_back(Branch{ Vec3{ 0.0f, 0.0f, 0.0f }, Vec3{ 0.0f, 0.0f, 1.0f },
-                            kTrunkRadius, std::max(params.length, kStep), 0,
-                            0x5EEDu });
+                            Vec3{ 1.0f, 0.0f, 0.0f },
+                            kTrunkRadius, stats.requested_length, 0, 0x5EEDu });
 
     while (!stack.empty() && out.size() < kMaxSegments) {
         Branch b = stack.back();
@@ -234,20 +250,27 @@ void vessel_build(const VesselParams &params, std::vector<VesselSegment> &out) {
         Rng rng{ b.seed | 1u };
         float run = 0.0f;  // distance this branch has covered since it started
 
-        while (b.budget > 0.0f && out.size() < kMaxSegments) {
-            const float step = std::min(kStep, b.budget);
+        while (b.budget > 0.0 && out.size() < kMaxSegments) {
+            const float step = static_cast<float>(std::min<double>(kStep, b.budget));
 
             // A gentle wander, so vessels do not look like drawn diagrams.
             Vec3 su, sv;
             basis_from_axis(b.dir, su, sv);
+            const Vec3 frame_in = b.frame;
             b.dir = normalize(b.dir + su * rng.range(-0.12f, 0.12f) +
                                       sv * rng.range(-0.12f, 0.12f));
 
+            // Parallel transport: keep the reference direction as close to
+            // where it was as the axis allows, rather than rebuilding it.
+            b.frame = normalize(b.frame - b.dir * dot(b.frame, b.dir));
+
             const Vec3 next = b.pos + b.dir * step;
-            out.push_back(VesselSegment{ b.pos, next, b.radius, b.radius });
+            out.push_back(VesselSegment{ b.pos, next, b.radius, b.radius,
+                                         frame_in, b.frame });
             b.pos = next;
             b.budget -= step;
             run += step;
+            stats.built_length += step;
 
             const bool can_fork = b.depth < kMaxDepth &&
                                   b.radius * kMurray > kCapillaryRadius;
@@ -261,18 +284,29 @@ void vessel_build(const VesselParams &params, std::vector<VesselSegment> &out) {
                 const float angle = rng.range(0.35f, 0.62f);
                 const float child_r = b.radius * kMurray;
 
-                // Each child carries on for what is left of the budget, which
-                // is what makes a longer vessel a more divided one.
-                stack.push_back(Branch{ b.pos, rotate_toward(b.dir, side, angle),
-                                        child_r, b.budget, b.depth + 1,
-                                        rng.next() });
-                stack.push_back(Branch{ b.pos, rotate_toward(b.dir, side, -angle),
-                                        child_r, b.budget, b.depth + 1,
-                                        rng.next() });
+                // The children share what is left, so the total length over
+                // the whole tree is exactly what was asked for.
+                const double half = b.budget * 0.5;
+                const Vec3 d0 = rotate_toward(b.dir, side, angle);
+                const Vec3 d1 = rotate_toward(b.dir, side, -angle);
+                stack.push_back(Branch{ b.pos, d0,
+                                        normalize(b.frame - d0 * dot(b.frame, d0)),
+                                        child_r, half, b.depth + 1, rng.next() });
+                stack.push_back(Branch{ b.pos, d1,
+                                        normalize(b.frame - d1 * dot(b.frame, d1)),
+                                        child_r, half, b.depth + 1, rng.next() });
                 break;
             }
         }
     }
+
+    // What was built is counted exactly. Past the geometry budget the
+    // remainder is almost all capillary, so it is accounted for at capillary
+    // density rather than generated -- the alternative is 10^12 segments.
+    const double built_cells = static_cast<double>(vessel_red_cell_count(out));
+    const double unbuilt = std::max(0.0, stats.requested_length - stats.built_length);
+    stats.true_cells = built_cells + unbuilt * kCapillaryCellsPerUm;
+    return stats;
 }
 
 float vessel_volume(std::span<const VesselSegment> segments) {
@@ -436,7 +470,9 @@ void vessel_draw(WGPURenderPassEncoder pass, const Mat4 &view_proj,
     g_instances.clear();
     for (const VesselSegment &s : segments) {
         g_instances.push_back(Instance{ s.a.x, s.a.y, s.a.z, s.ra,
-                                        s.b.x, s.b.y, s.b.z, s.rb });
+                                        s.b.x, s.b.y, s.b.z, s.rb,
+                                        s.ua.x, s.ua.y, s.ua.z, 0.0f,
+                                        s.ub.x, s.ub.y, s.ub.z, 0.0f });
     }
     wgpuQueueWriteBuffer(g_queue, g_instance_buffer, 0, g_instances.data(),
                          g_instances.size() * sizeof(Instance));
