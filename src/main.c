@@ -4,6 +4,7 @@
 // init is callback-driven, so -sASYNCIFY is not needed.
 
 #include <stdbool.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -14,6 +15,7 @@
 
 #include "microui.h"
 #include "renderer.h"
+#include "cells.h"
 
 #define CANVAS "#canvas"
 
@@ -34,6 +36,11 @@ static int g_scale = 1;              // integer UI scale (from devicePixelRatio)
 static float g_clear[3] = { 0.09f, 0.09f, 0.12f };
 static float g_speed = 1.0f;
 static int   g_running = 1;
+
+// The first thing being simulated: one red blood cell, drifting.
+static float  g_cell_radius = 48.0f;
+static double g_sim_time;      // seconds, advanced only while running
+static double g_last_now;      // emscripten_get_now() at the previous frame
 
 /* ---------------------------------------------------------------- input -- */
 
@@ -96,6 +103,8 @@ static void build_ui(void) {
 
         mu_label(g_ctx, "speed");
         mu_slider(g_ctx, &g_speed, 0.0f, 10.0f);
+        mu_label(g_ctx, "cell size");
+        mu_slider(g_ctx, &g_cell_radius, 8.0f, 160.0f);
 
         mu_label(g_ctx, "red");
         mu_slider(g_ctx, &g_clear[0], 0.0f, 1.0f);
@@ -109,6 +118,7 @@ static void build_ui(void) {
         if (mu_button(g_ctx, "reset")) {
             g_clear[0] = 0.09f; g_clear[1] = 0.09f; g_clear[2] = 0.12f;
             g_speed = 1.0f;
+            g_cell_radius = 48.0f;
         }
 
         mu_end_window(g_ctx);
@@ -143,9 +153,24 @@ static void frame(void) {
     const int logical_w = g_fb_width / g_scale;
     const int logical_h = g_fb_height / g_scale;
 
+    // Advance on wall-clock delta rather than per frame, so the drift runs at
+    // the same rate on a 60Hz and a 120Hz display.
+    const double now = emscripten_get_now() / 1000.0;
+    double dt = g_last_now > 0.0 ? now - g_last_now : 0.0;
+    g_last_now = now;
+    if (dt > 0.1) dt = 0.1;  // a backgrounded tab can hand back a huge delta
+    if (g_running) g_sim_time += dt * g_speed;
+
     mu_begin(g_ctx);
     build_ui();
     mu_end(g_ctx);
+
+    // One cell for now, drifting around the middle of the canvas.
+    const float t  = (float)g_sim_time;
+    const float cx = logical_w * 0.5f + sinf(t * 0.6f) * (logical_w * 0.12f);
+    const float cy = logical_h * 0.5f + sinf(t * 0.9f) * (logical_h * 0.08f);
+    cells_begin(logical_w, logical_h);
+    cells_add(cx, cy, g_cell_radius, 0xFF322DC8u);  // RGBA8: deep red, opaque
 
     r_begin(logical_w, logical_h, g_scale);
     mu_Command *cmd = NULL;
@@ -177,6 +202,9 @@ static void frame(void) {
 
     WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(g_device, NULL);
     WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc);
+    // Cells first: r_end sets scissor rects, and they persist for the rest of
+    // the pass. The UI draws on top.
+    cells_end(pass);
     r_end(pass);
     wgpuRenderPassEncoderEnd(pass);
 
@@ -214,6 +242,7 @@ static void start(void) {
     g_ctx->text_height = text_height;
 
     r_init(g_device, g_queue, kSurfaceFormat);
+    cells_init(g_device, g_queue, kSurfaceFormat);
 
     emscripten_set_mousemove_callback(CANVAS, NULL, 0, on_mouse);
     emscripten_set_mousedown_callback(CANVAS, NULL, 0, on_mouse);

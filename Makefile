@@ -6,8 +6,8 @@ MICROUI = third_party/microui
 BUILD  ?= build
 PORT   ?= 8000
 
-SOURCES = src/main.c src/renderer.c $(MICROUI)/src/microui.c
-OBJECTS = $(BUILD)/main.o $(BUILD)/renderer.o $(BUILD)/microui.o
+SOURCES = src/main.c src/renderer.c src/cells.c $(MICROUI)/src/microui.c
+OBJECTS = $(BUILD)/main.o $(BUILD)/renderer.o $(BUILD)/cells.o $(BUILD)/microui.o
 
 CFLAGS = \
 	-std=c99 \
@@ -36,7 +36,10 @@ $(MICROUI)/src/microui.c:
 $(BUILD)/index.html: $(OBJECTS) src/shell.html
 	$(EMXX) $(OBJECTS) $(LDFLAGS) -o $@
 
-$(BUILD)/main.o: src/main.c src/renderer.h $(MICROUI)/src/microui.c | $(BUILD)
+$(BUILD)/main.o: src/main.c src/renderer.h src/cells.h $(MICROUI)/src/microui.c | $(BUILD)
+	$(EMCC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/cells.o: src/cells.c src/cells.h | $(BUILD)
 	$(EMCC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/renderer.o: src/renderer.c src/renderer.h $(MICROUI)/src/microui.c | $(BUILD)
