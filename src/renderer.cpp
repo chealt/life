@@ -244,10 +244,14 @@ static void push_quad(mu_Rect dst, mu_Rect src, mu_Color color) {
         b->clip = g_clip;
     }
 
-    const float u0 = (float)src.x / ATLAS_WIDTH;
-    const float v0 = (float)src.y / ATLAS_HEIGHT;
-    const float u1 = (float)(src.x + src.w) / ATLAS_WIDTH;
-    const float v1 = (float)(src.y + src.h) / ATLAS_HEIGHT;
+    // The atlas dimensions are unscoped enum constants; C++23 deprecates using
+    // those directly in float arithmetic, so name them as floats first.
+    constexpr float atlas_w = static_cast<float>(ATLAS_WIDTH);
+    constexpr float atlas_h = static_cast<float>(ATLAS_HEIGHT);
+    const float u0 = (float)src.x / atlas_w;
+    const float v0 = (float)src.y / atlas_h;
+    const float u1 = (float)(src.x + src.w) / atlas_w;
+    const float v1 = (float)(src.y + src.h) / atlas_h;
     const float x0 = (float)dst.x, y0 = (float)dst.y;
     const float x1 = (float)(dst.x + dst.w), y1 = (float)(dst.y + dst.h);
     const uint32_t rgba = (uint32_t)color.r | ((uint32_t)color.g << 8) |

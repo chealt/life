@@ -10,7 +10,7 @@ INCLUDES = -I$(MICROUI)/src -I$(MICROUI)/demo -Isrc
 
 COMMON = $(INCLUDES) -Os -msimd128 --use-port=emdawnwebgpu
 
-CXXFLAGS = -std=c++17 $(COMMON)
+CXXFLAGS = -std=c++23 $(COMMON)
 
 # microui is upstream C and stays that way; only our own sources are C++.
 CFLAGS = -std=c99 $(COMMON)

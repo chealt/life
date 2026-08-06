@@ -3,11 +3,11 @@
 // No GLFW, no C++ runtime. Input comes straight off the html5 event API and
 // init is callback-driven, so -sASYNCIFY is not needed.
 
-#include <stdbool.h>
-#include <math.h>
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <random>
+#include <vector>
 
 #include <emscripten.h>
 #include <emscripten/html5.h>
@@ -34,10 +34,58 @@ static int g_scale = 1;              // integer UI scale (from devicePixelRatio)
 static const float g_clear[3] = { 0.09f, 0.09f, 0.12f };
 static float g_speed = 1.0f;
 
-// The first thing being simulated: one red blood cell, drifting.
-#define CELL_RADIUS 48.0f      // world units
 static double g_sim_time;      // seconds
 static double g_last_now;      // emscripten_get_now() at the previous frame
+
+// The population. Each cell keeps the constants that make it look like an
+// individual -- size, tilt, tint -- plus how it moves; only the position is
+// recomputed per frame.
+struct Drifter {
+    Cell  cell;
+    float home_x = 0.0f, home_y = 0.0f;  // world units
+    float amp_x  = 0.0f, amp_y  = 0.0f;
+    float rate_x = 0.0f, rate_y = 0.0f;
+    float phase  = 0.0f;
+    float spin   = 0.0f;
+};
+
+static std::vector<Drifter> g_field;
+static std::vector<Cell>    g_visible;  // rebuilt per frame, kept to avoid churn
+static float g_red_count = 120.0f;      // driven by a slider, hence float
+
+// World extent the cells are scattered across, in world units.
+constexpr float kWorldX = 900.0f;
+constexpr float kWorldY = 620.0f;
+
+// Deterministic, so the same layout comes back after a reset.
+static void spawn_field(std::size_t n) {
+    static std::mt19937 rng{ 0xB100Du };
+    auto uniform = [](float lo, float hi) {
+        return std::uniform_real_distribution<float>{ lo, hi };
+    };
+
+    while (g_field.size() < n) {
+        Drifter d;
+        d.home_x = uniform(-kWorldX, kWorldX)(rng);
+        d.home_y = uniform(-kWorldY, kWorldY)(rng);
+        d.amp_x  = uniform(10.0f, 45.0f)(rng);
+        d.amp_y  = uniform(8.0f, 30.0f)(rng);
+        d.rate_x = uniform(0.15f, 0.5f)(rng);
+        d.rate_y = uniform(0.2f, 0.7f)(rng);
+        d.phase  = uniform(0.0f, 6.283f)(rng);
+        d.spin   = uniform(-0.25f, 0.25f)(rng);
+
+        // Real red cells are ~7-8um across and vary little; the tilt is what
+        // makes a smear look varied, not the size.
+        d.cell.kind   = CellKind::RedBlood;
+        d.cell.radius = uniform(20.0f, 26.0f)(rng);
+        d.cell.angle  = uniform(0.0f, 6.283f)(rng);
+        d.cell.squash = uniform(0.55f, 1.0f)(rng);
+        d.cell.seed   = uniform(0.0f, 1.0f)(rng);
+        g_field.push_back(d);
+    }
+    if (g_field.size() > n) g_field.resize(n);
+}
 
 // Camera. World units are scaled by this on the way to the screen; the UI is
 // deliberately unaffected, so the panel stays legible at any zoom.
@@ -176,18 +224,22 @@ static void apply_style(void) {
 }
 
 static void build_ui(void) {
-    if (mu_begin_window(g_ctx, "life", mu_rect(24, 24, 280, 150))) {
+    if (mu_begin_window(g_ctx, "life", mu_rect(24, 24, 280, 200))) {
         static const int row_label_field[] = { 90, -1 };
         mu_layout_row(g_ctx, 2, row_label_field, 0);
 
         mu_label(g_ctx, "speed");
         mu_slider(g_ctx, &g_speed, 0.0f, 10.0f);
 
+        mu_label(g_ctx, "red cells");
+        mu_slider(g_ctx, &g_red_count, 0.0f, 4000.0f);
+
         static const int row_full[] = { -1 };
         mu_layout_row(g_ctx, 1, row_full, 0);
         if (mu_button(g_ctx, "reset")) {
             g_speed = 1.0f;
             g_zoom = 1.0f;
+            g_red_count = 120.0f;
         }
 
         mu_end_window(g_ctx);
@@ -234,15 +286,24 @@ static void frame(void) {
     build_ui();
     mu_end(g_ctx);
 
-    // One cell for now, drifting in world units around the origin. The camera
-    // maps world to screen; zoom about the centre of the canvas.
-    const float t  = (float)g_sim_time;
-    const float wx = sinf(t * 0.6f) * 90.0f;
-    const float wy = sinf(t * 0.9f) * 60.0f;
-    const float cx = logical_w * 0.5f + wx * g_zoom;
-    const float cy = logical_h * 0.5f + wy * g_zoom;
-    cells_begin(logical_w, logical_h);
-    cells_add(cx, cy, CELL_RADIUS * g_zoom, 0xFF322DC8u);  // RGBA8: deep red
+    // Cells live in world units around the origin; the camera maps world to
+    // screen, zooming about the centre of the canvas.
+    spawn_field(static_cast<std::size_t>(g_red_count));
+
+    const float t = static_cast<float>(g_sim_time);
+    g_visible.clear();
+    g_visible.reserve(g_field.size());
+    for (const Drifter &d : g_field) {
+        const float wx = d.home_x + std::sin(t * d.rate_x + d.phase) * d.amp_x;
+        const float wy = d.home_y + std::sin(t * d.rate_y + d.phase) * d.amp_y;
+
+        Cell c = d.cell;
+        c.x      = logical_w * 0.5f + wx * g_zoom;
+        c.y      = logical_h * 0.5f + wy * g_zoom;
+        c.radius = d.cell.radius * g_zoom;
+        c.angle  = d.cell.angle + t * d.spin;
+        g_visible.push_back(c);
+    }
 
     r_begin(logical_w, logical_h, g_scale);
     mu_Command *cmd = NULL;
@@ -276,7 +337,7 @@ static void frame(void) {
     WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc);
     // Cells first: r_end sets scissor rects, and they persist for the rest of
     // the pass. The UI draws on top.
-    cells_end(pass);
+    cells_draw(pass, logical_w, logical_h, g_visible);
     r_end(pass);
     wgpuRenderPassEncoderEnd(pass);
 
