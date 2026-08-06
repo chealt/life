@@ -16,7 +16,7 @@
 
 #include "camera.h"
 #include "cells.h"
-#include "field.h"
+#include "vessel.h"
 #include "math3d.h"
 #include "renderer.h"
 #include "ui.h"
@@ -44,12 +44,14 @@ static constexpr float kClear[3] = { 0.045f, 0.05f, 0.07f };
 static Camera g_camera;
 static double g_last_now;  // emscripten_get_now() at the previous frame
 
-// How far from the camera cells are generated. Beyond this the field simply
-// is not built, which is what keeps an unbounded world affordable.
-static float g_view_range = 1600.0f;
+// The physiological count runs into millions for even a short vessel, so what
+// is drawn is thinned to this. The real number is still reported.
+constexpr std::size_t kDrawBudget = 120000;
 
-static FieldParams g_field_params;
+static VesselParams g_vessel_params;
+static std::vector<VesselSegment> g_segments;
 static std::vector<Cell> g_cells;
+static std::size_t g_true_cell_count;
 
 /* ---------------------------------------------------------------- input -- */
 
@@ -202,22 +204,31 @@ static void build_ui(int width, int height) {
 
     ui_panel_begin("controls", 24, 24, 320);
 
-    ui_category("cells");
-    ui_slider_int("red blood cells", &g_field_params.per_chunk, 0, 200);
-
-    ui_category("view");
-    ui_slider_float("range", &g_view_range, 400.0f, 6000.0f);
-
     char count[32];
-    format_grouped(g_cells.size(), count, sizeof(count));
-    char buf[64];
+    char buf[80];
+
+    ui_category("vessel");
+    ui_slider_float("length (um)", &g_vessel_params.length, 120.0f, 4000.0f);
+
+    format_grouped(g_segments.size(), count, sizeof(count));
+    std::snprintf(buf, sizeof(buf), "segments   %s", count);
+    ui_label(buf);
+
+    ui_category("cells");
+    format_grouped(g_true_cell_count, count, sizeof(count));
     std::snprintf(buf, sizeof(buf), "number of cells   %s", count);
     ui_label(buf);
 
+    if (g_cells.size() < g_true_cell_count) {
+        format_grouped(g_cells.size(), count, sizeof(count));
+        std::snprintf(buf, sizeof(buf), "drawn   %s", count);
+        ui_label(buf);
+    }
+
     if (ui_button("reset view")) {
         g_camera = Camera{};
-        g_field_params = FieldParams{};
-        g_view_range = 1600.0f;
+        g_camera.distance = g_vessel_params.length * 0.9f;
+        g_camera.target = Vec3{ 0.0f, 0.0f, g_vessel_params.length * 0.35f };
     }
 
     ui_panel_end();
@@ -280,9 +291,11 @@ static void frame() {
     g_ui_input.mouse_pressed = g_ui_pressed_this_frame;
     g_ui_pressed_this_frame = false;
 
-    // Cells are generated around wherever the camera is looking, so the field
-    // has no edges to reach.
-    field_gather(g_camera.target, g_view_range, g_field_params, g_cells);
+    // The vessel is regenerated from its length each frame: it is cheap, and
+    // it keeps the length control immediate.
+    vessel_build(g_vessel_params, g_segments);
+    g_true_cell_count = vessel_red_cell_count(g_segments);
+    vessel_fill(g_segments, kDrawBudget, g_cells);
 
     ui_begin(g_ui_input, logical_w, logical_h);
     r_begin(logical_w, logical_h, g_scale);
@@ -325,6 +338,8 @@ static void frame() {
     const Vec3 cam_up = cross(g_camera.forward(), cam_right);
     cells_draw(pass, g_camera.view_proj(aspect), g_camera.eye(),
                cam_right, cam_up, g_cells);
+    // The wall is translucent, so it goes over the blood it contains.
+    vessel_draw(pass, g_camera.view_proj(aspect), g_camera.eye(), g_segments);
     r_end(pass);
     wgpuRenderPassEncoderEnd(pass);
 
@@ -346,6 +361,11 @@ static void start() {
 
     r_init(g_device, g_queue, kSurfaceFormat, kDepthFormat);
     cells_init(g_device, g_queue, kSurfaceFormat, kDepthFormat);
+    vessel_init(g_device, g_queue, kSurfaceFormat, kDepthFormat);
+
+    // Frame the vessel rather than starting inside it.
+    g_camera.distance = g_vessel_params.length * 0.9f;
+    g_camera.target = Vec3{ 0.0f, 0.0f, g_vessel_params.length * 0.35f };
 
     emscripten_set_mousemove_callback(CANVAS, nullptr, 0, on_mouse);
     emscripten_set_mousedown_callback(CANVAS, nullptr, 0, on_mouse);
