@@ -1,25 +1,31 @@
-// Immediate-mode UI in the browser: microui -> WebGPU -> canvas.
+// A 3D view onto an unbounded field of cells.
 //
-// No GLFW, no C++ runtime. Input comes straight off the html5 event API and
-// init is callback-driven, so -sASYNCIFY is not needed.
+// No GLFW, no C++ runtime beyond the standard library. Input comes straight
+// off the html5 event API and init is callback-driven, so -sASYNCIFY is not
+// needed.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <random>
 #include <vector>
 
 #include <emscripten.h>
 #include <emscripten/html5.h>
 #include <webgpu/webgpu.h>
 
-#include "renderer.h"  // pulls in microui.h with C linkage
+#include "camera.h"
 #include "cells.h"
+#include "field.h"
+#include "math3d.h"
+#include "renderer.h"
+#include "ui.h"
 
 #define CANVAS "#canvas"
 
 // Browsers hand out BGRA8Unorm for canvas surfaces.
-static const WGPUTextureFormat kSurfaceFormat = WGPUTextureFormat_BGRA8Unorm;
+constexpr WGPUTextureFormat kSurfaceFormat = WGPUTextureFormat_BGRA8Unorm;
+constexpr WGPUTextureFormat kDepthFormat   = WGPUTextureFormat_Depth24Plus;
 
 static WGPUInstance g_instance;
 static WGPUAdapter  g_adapter;
@@ -27,223 +33,179 @@ static WGPUDevice   g_device;
 static WGPUQueue    g_queue;
 static WGPUSurface  g_surface;
 
-static mu_Context *g_ctx;
+static WGPUTexture     g_depth_texture;
+static WGPUTextureView g_depth_view;
+
 static int g_fb_width, g_fb_height;  // framebuffer pixels
 static int g_scale = 1;              // integer UI scale (from devicePixelRatio)
 
-static const float g_clear[3] = { 0.09f, 0.09f, 0.12f };
-static float g_speed = 1.0f;
+static constexpr float kClear[3] = { 0.045f, 0.05f, 0.07f };
 
-static double g_sim_time;      // seconds
-static double g_last_now;      // emscripten_get_now() at the previous frame
+static Camera g_camera;
+static double g_last_now;  // emscripten_get_now() at the previous frame
 
-// The population. Each cell keeps the constants that make it look like an
-// individual -- size, tilt, tint -- plus how it moves; only the position is
-// recomputed per frame.
-struct Drifter {
-    Cell  cell;
-    float home_x = 0.0f, home_y = 0.0f;  // world units
-    float amp_x  = 0.0f, amp_y  = 0.0f;
-    float rate_x = 0.0f, rate_y = 0.0f;
-    float phase  = 0.0f;
-    float spin   = 0.0f;
-};
+// How far from the camera cells are generated. Beyond this the field simply
+// is not built, which is what keeps an unbounded world affordable.
+static float g_view_range = 1600.0f;
 
-static std::vector<Drifter> g_field;
-static std::vector<Cell>    g_visible;  // rebuilt per frame, kept to avoid churn
-static float g_red_count = 120.0f;      // driven by a slider, hence float
-
-// World extent the cells are scattered across, in world units.
-constexpr float kWorldX = 900.0f;
-constexpr float kWorldY = 620.0f;
-
-// Deterministic, so the same layout comes back after a reset.
-static void spawn_field(std::size_t n) {
-    static std::mt19937 rng{ 0xB100Du };
-    auto uniform = [](float lo, float hi) {
-        return std::uniform_real_distribution<float>{ lo, hi };
-    };
-
-    while (g_field.size() < n) {
-        Drifter d;
-        d.home_x = uniform(-kWorldX, kWorldX)(rng);
-        d.home_y = uniform(-kWorldY, kWorldY)(rng);
-        d.amp_x  = uniform(10.0f, 45.0f)(rng);
-        d.amp_y  = uniform(8.0f, 30.0f)(rng);
-        d.rate_x = uniform(0.15f, 0.5f)(rng);
-        d.rate_y = uniform(0.2f, 0.7f)(rng);
-        d.phase  = uniform(0.0f, 6.283f)(rng);
-        d.spin   = uniform(-0.25f, 0.25f)(rng);
-
-        // Real red cells are ~7-8um across and vary little; the tilt is what
-        // makes a smear look varied, not the size.
-        d.cell.kind   = CellKind::RedBlood;
-        d.cell.radius = uniform(20.0f, 26.0f)(rng);
-        d.cell.angle  = uniform(0.0f, 6.283f)(rng);
-        d.cell.squash = uniform(0.55f, 1.0f)(rng);
-        d.cell.seed   = uniform(0.0f, 1.0f)(rng);
-        g_field.push_back(d);
-    }
-    if (g_field.size() > n) g_field.resize(n);
-}
-
-// Camera. World units are scaled by this on the way to the screen; the UI is
-// deliberately unaffected, so the panel stays legible at any zoom.
-#define ZOOM_MIN 0.25f
-#define ZOOM_MAX 8.0f
-static float g_zoom = 1.0f;
-
-static void zoom_by(float factor) {
-    g_zoom *= factor;
-    if (g_zoom < ZOOM_MIN) g_zoom = ZOOM_MIN;
-    if (g_zoom > ZOOM_MAX) g_zoom = ZOOM_MAX;
-}
+static FieldParams g_field_params;
+static std::vector<Cell> g_cells;
 
 /* ---------------------------------------------------------------- input -- */
 
+static UiInput g_ui_input;
+static bool    g_ui_pressed_this_frame;
+
+// Drag state. The camera only sees a drag the UI did not claim on press.
+static bool  g_dragging;
+static bool  g_drag_pans;   // right button, or shift held
+static float g_last_x, g_last_y;
+
 static int css_to_logical(double v) {
-    return (int)(v * emscripten_get_device_pixel_ratio() / g_scale + 0.5);
+    return static_cast<int>(v * emscripten_get_device_pixel_ratio() / g_scale + 0.5);
 }
 
 static bool on_mouse(int type, const EmscriptenMouseEvent *e, void *ud) {
     (void)ud;
-    int x = css_to_logical(e->targetX);
-    int y = css_to_logical(e->targetY);
-    int btn = e->button == 1 ? MU_MOUSE_MIDDLE
-            : e->button == 2 ? MU_MOUSE_RIGHT
-                             : MU_MOUSE_LEFT;
+    const int x = css_to_logical(e->targetX);
+    const int y = css_to_logical(e->targetY);
+
+    g_ui_input.mouse_x = x;
+    g_ui_input.mouse_y = y;
+
     switch (type) {
-        case EMSCRIPTEN_EVENT_MOUSEMOVE: mu_input_mousemove(g_ctx, x, y); break;
-        case EMSCRIPTEN_EVENT_MOUSEDOWN: mu_input_mousedown(g_ctx, x, y, btn); break;
-        case EMSCRIPTEN_EVENT_MOUSEUP:   mu_input_mouseup(g_ctx, x, y, btn); break;
+        case EMSCRIPTEN_EVENT_MOUSEDOWN:
+            g_ui_input.mouse_down = true;
+            g_ui_pressed_this_frame = true;
+            // The UI gets first refusal; only then does it become a camera drag.
+            if (!ui_captures_mouse(x, y)) {
+                g_dragging = true;
+                g_drag_pans = (e->button == 2) || (e->button == 1) || e->shiftKey;
+                g_last_x = static_cast<float>(x);
+                g_last_y = static_cast<float>(y);
+            }
+            break;
+
+        case EMSCRIPTEN_EVENT_MOUSEUP:
+            g_ui_input.mouse_down = false;
+            g_dragging = false;
+            break;
+
+        case EMSCRIPTEN_EVENT_MOUSEMOVE: {
+            if (!g_dragging) break;
+            const float dx = static_cast<float>(x) - g_last_x;
+            const float dy = static_cast<float>(y) - g_last_y;
+            g_last_x = static_cast<float>(x);
+            g_last_y = static_cast<float>(y);
+            if (g_drag_pans) g_camera.pan(dx, dy);
+            else             g_camera.orbit(dx, -dy);
+            break;
+        }
     }
     return true;
 }
 
 static bool on_wheel(int type, const EmscriptenWheelEvent *e, void *ud) {
     (void)type; (void)ud;
-
-    // Over a microui window the wheel still scrolls it; only the empty canvas
-    // zooms. hover_root is from the last frame, which is close enough.
-    if (g_ctx->hover_root) {
-        mu_input_scroll(g_ctx, (int)e->deltaX, (int)e->deltaY);
-        return true;
-    }
+    if (ui_captures_mouse(g_ui_input.mouse_x, g_ui_input.mouse_y)) return true;
 
     // Firefox reports lines, and page mode shows up on some configurations.
     double dy = e->deltaY;
     if (e->deltaMode == DOM_DELTA_LINE)      dy *= 16.0;
     else if (e->deltaMode == DOM_DELTA_PAGE) dy *= 100.0;
 
-    zoom_by(expf((float)-dy * 0.0015f));
+    g_camera.dolly(std::exp(static_cast<float>(dy) * 0.0015f));
     return true;
 }
 
-// Pinch: the ratio of finger separation between two moves is the zoom factor,
-// so it needs no reference to absolute distance or DPI.
+// Touch: one finger orbits, two fingers pinch to dolly and drag to pan.
 static float g_pinch_dist;
+static float g_pinch_x, g_pinch_y;
+static bool  g_touch_orbiting;
 
 static float touch_dist(const EmscriptenTouchEvent *e) {
-    const float dx = (float)(e->touches[0].targetX - e->touches[1].targetX);
-    const float dy = (float)(e->touches[0].targetY - e->touches[1].targetY);
-    return hypotf(dx, dy);
+    const float dx = static_cast<float>(e->touches[0].targetX - e->touches[1].targetX);
+    const float dy = static_cast<float>(e->touches[0].targetY - e->touches[1].targetY);
+    return std::hypot(dx, dy);
 }
 
 static bool on_touch(int type, const EmscriptenTouchEvent *e, void *ud) {
     (void)ud;
-    if (type == EMSCRIPTEN_EVENT_TOUCHEND || type == EMSCRIPTEN_EVENT_TOUCHCANCEL ||
-        e->numTouches < 2) {
+    if (type == EMSCRIPTEN_EVENT_TOUCHEND || type == EMSCRIPTEN_EVENT_TOUCHCANCEL) {
         g_pinch_dist = 0.0f;
-        return false;  // let one-finger gestures through
+        g_touch_orbiting = false;
+        g_ui_input.mouse_down = false;
+        return false;
     }
+
+    if (e->numTouches == 1) {
+        const int x = css_to_logical(e->touches[0].targetX);
+        const int y = css_to_logical(e->touches[0].targetY);
+        g_ui_input.mouse_x = x;
+        g_ui_input.mouse_y = y;
+
+        if (type == EMSCRIPTEN_EVENT_TOUCHSTART) {
+            g_ui_input.mouse_down = true;
+            g_ui_pressed_this_frame = true;
+            g_touch_orbiting = !ui_captures_mouse(x, y);
+            g_last_x = static_cast<float>(x);
+            g_last_y = static_cast<float>(y);
+        } else if (g_touch_orbiting) {
+            g_camera.orbit(static_cast<float>(x) - g_last_x,
+                           -(static_cast<float>(y) - g_last_y));
+            g_last_x = static_cast<float>(x);
+            g_last_y = static_cast<float>(y);
+        }
+        g_pinch_dist = 0.0f;
+        return true;
+    }
+
+    if (e->numTouches < 2) return false;
+
+    g_touch_orbiting = false;
+    g_ui_input.mouse_down = false;
 
     const float dist = touch_dist(e);
+    const float mid_x = 0.5f * static_cast<float>(e->touches[0].targetX +
+                                                  e->touches[1].targetX);
+    const float mid_y = 0.5f * static_cast<float>(e->touches[0].targetY +
+                                                  e->touches[1].targetY);
+
     if (type == EMSCRIPTEN_EVENT_TOUCHMOVE && g_pinch_dist > 0.0f && dist > 0.0f) {
-        zoom_by(dist / g_pinch_dist);
+        // Separation ratio drives the dolly; the midpoint drags the target.
+        g_camera.dolly(g_pinch_dist / dist);
+        g_camera.pan((mid_x - g_pinch_x) * 0.5f, (mid_y - g_pinch_y) * 0.5f);
     }
     g_pinch_dist = dist;
+    g_pinch_x = mid_x;
+    g_pinch_y = mid_y;
     return true;  // claim the gesture so the page itself does not zoom
-}
-
-static int map_key(const char *code) {
-    if (!strcmp(code, "ShiftLeft")   || !strcmp(code, "ShiftRight"))   return MU_KEY_SHIFT;
-    if (!strcmp(code, "ControlLeft") || !strcmp(code, "ControlRight")) return MU_KEY_CTRL;
-    if (!strcmp(code, "AltLeft")     || !strcmp(code, "AltRight"))     return MU_KEY_ALT;
-    if (!strcmp(code, "Backspace")) return MU_KEY_BACKSPACE;
-    if (!strcmp(code, "Enter"))     return MU_KEY_RETURN;
-    return 0;
-}
-
-static bool on_key(int type, const EmscriptenKeyboardEvent *e, void *ud) {
-    (void)ud;
-    int key = map_key(e->code);
-    if (key) {
-        if (type == EMSCRIPTEN_EVENT_KEYDOWN) mu_input_keydown(g_ctx, key);
-        else                                  mu_input_keyup(g_ctx, key);
-        return true;
-    }
-    // Printable characters arrive here as a one-glyph `key` string.
-    if (type == EMSCRIPTEN_EVENT_KEYDOWN && strlen(e->key) == 1) {
-        char text[2] = { e->key[0], 0 };
-        mu_input_text(g_ctx, text);
-        return true;
-    }
-    return false;
 }
 
 /* ------------------------------------------------------------------- ui -- */
 
-// microui ships a grey debug-tool palette. Everything here is still an
-// axis-aligned rect -- it has no rounded corners or gradients -- so the look
-// comes from colour, weight and spacing: a near-black translucent panel, no
-// borders, and one red accent that ties the UI to what is being simulated.
-static void apply_style(void) {
-    mu_Style *s = g_ctx->style;
+static void build_ui(int width, int height) {
+    (void)width; (void)height;
 
-    s->size          = mu_vec2(68, 16);  // taller controls, easier to hit
-    s->padding       = 8;
-    s->spacing       = 7;
-    s->title_height  = 30;
-    s->scrollbar_size = 10;
-    s->thumb_size    = 10;
+    ui_panel_begin("life", 24, 24, 300);
 
-    s->colors[MU_COLOR_TEXT]        = mu_color(198, 202, 212, 255);
-    s->colors[MU_COLOR_BORDER]      = mu_color(0, 0, 0, 0);       // borderless
-    s->colors[MU_COLOR_WINDOWBG]    = mu_color(18, 19, 24, 232);  // sits over the sim
-    s->colors[MU_COLOR_TITLEBG]     = mu_color(26, 28, 35, 255);
-    s->colors[MU_COLOR_TITLETEXT]   = mu_color(236, 238, 243, 255);
-    s->colors[MU_COLOR_PANELBG]     = mu_color(0, 0, 0, 0);
-    s->colors[MU_COLOR_BUTTON]      = mu_color(38, 41, 51, 255);
-    s->colors[MU_COLOR_BUTTONHOVER] = mu_color(50, 54, 68, 255);
-    s->colors[MU_COLOR_BUTTONFOCUS] = mu_color(200, 45, 50, 255);  // accent
-    s->colors[MU_COLOR_BASE]        = mu_color(30, 32, 40, 255);
-    s->colors[MU_COLOR_BASEHOVER]   = mu_color(40, 43, 54, 255);
-    s->colors[MU_COLOR_BASEFOCUS]   = mu_color(200, 45, 50, 255);  // accent
-    s->colors[MU_COLOR_SCROLLBASE]  = mu_color(24, 26, 32, 255);
-    s->colors[MU_COLOR_SCROLLTHUMB] = mu_color(58, 62, 74, 255);
-}
+    ui_category("blood");
+    ui_slider_int("red blood cells", &g_field_params.per_chunk, 0, 200);
 
-static void build_ui(void) {
-    if (mu_begin_window(g_ctx, "life", mu_rect(24, 24, 280, 200))) {
-        static const int row_label_field[] = { 90, -1 };
-        mu_layout_row(g_ctx, 2, row_label_field, 0);
+    ui_category("view");
+    ui_slider_float("range", &g_view_range, 400.0f, 6000.0f);
 
-        mu_label(g_ctx, "speed");
-        mu_slider(g_ctx, &g_speed, 0.0f, 10.0f);
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "drawn  %zu", g_cells.size());
+    ui_label(buf);
 
-        mu_label(g_ctx, "red cells");
-        mu_slider(g_ctx, &g_red_count, 0.0f, 4000.0f);
-
-        static const int row_full[] = { -1 };
-        mu_layout_row(g_ctx, 1, row_full, 0);
-        if (mu_button(g_ctx, "reset")) {
-            g_speed = 1.0f;
-            g_zoom = 1.0f;
-            g_red_count = 120.0f;
-        }
-
-        mu_end_window(g_ctx);
+    if (ui_button("reset view")) {
+        g_camera = Camera{};
+        g_field_params = FieldParams{};
+        g_view_range = 1600.0f;
     }
+
+    ui_panel_end();
 }
 
 /* ---------------------------------------------------------------- frame -- */
@@ -253,14 +215,31 @@ static void configure_surface(int w, int h) {
     config.device      = g_device;
     config.format      = kSurfaceFormat;
     config.usage       = WGPUTextureUsage_RenderAttachment;
-    config.width       = (uint32_t)w;
-    config.height      = (uint32_t)h;
+    config.width       = static_cast<uint32_t>(w);
+    config.height      = static_cast<uint32_t>(h);
     config.presentMode = WGPUPresentMode_Fifo;
     config.alphaMode   = WGPUCompositeAlphaMode_Auto;
     wgpuSurfaceConfigure(g_surface, &config);
 }
 
-static void frame(void) {
+static void create_depth_target(int w, int h) {
+    if (g_depth_view) wgpuTextureViewRelease(g_depth_view);
+    if (g_depth_texture) wgpuTextureRelease(g_depth_texture);
+
+    WGPUTextureDescriptor desc = {};
+    desc.dimension     = WGPUTextureDimension_2D;
+    desc.size.width    = static_cast<uint32_t>(w);
+    desc.size.height   = static_cast<uint32_t>(h);
+    desc.size.depthOrArrayLayers = 1;
+    desc.format        = kDepthFormat;
+    desc.mipLevelCount = 1;
+    desc.sampleCount   = 1;
+    desc.usage         = WGPUTextureUsage_RenderAttachment;
+    g_depth_texture = wgpuDeviceCreateTexture(g_device, &desc);
+    g_depth_view = wgpuTextureCreateView(g_depth_texture, nullptr);
+}
+
+static void frame() {
     // The shell's JS keeps the backing store at CSS size * devicePixelRatio.
     int w = 0, h = 0;
     emscripten_get_canvas_element_size(CANVAS, &w, &h);
@@ -269,79 +248,68 @@ static void frame(void) {
         g_fb_width = w;
         g_fb_height = h;
         configure_surface(w, h);
+        create_depth_target(w, h);
     }
 
     const int logical_w = g_fb_width / g_scale;
     const int logical_h = g_fb_height / g_scale;
 
-    // Advance on wall-clock delta rather than per frame, so the drift runs at
-    // the same rate on a 60Hz and a 120Hz display.
+    // Advance on wall-clock delta rather than per frame, so anything animated
+    // runs at the same rate on a 60Hz and a 120Hz display.
     const double now = emscripten_get_now() / 1000.0;
     double dt = g_last_now > 0.0 ? now - g_last_now : 0.0;
     g_last_now = now;
     if (dt > 0.1) dt = 0.1;  // a backgrounded tab can hand back a huge delta
-    g_sim_time += dt * g_speed;
+    (void)dt;
 
-    mu_begin(g_ctx);
-    build_ui();
-    mu_end(g_ctx);
+    g_ui_input.mouse_pressed = g_ui_pressed_this_frame;
+    g_ui_pressed_this_frame = false;
 
-    // Cells live in world units around the origin; the camera maps world to
-    // screen, zooming about the centre of the canvas.
-    spawn_field(static_cast<std::size_t>(g_red_count));
+    // Cells are generated around wherever the camera is looking, so the field
+    // has no edges to reach.
+    field_gather(g_camera.target, g_view_range, g_field_params, g_cells);
 
-    const float t = static_cast<float>(g_sim_time);
-    g_visible.clear();
-    g_visible.reserve(g_field.size());
-    for (const Drifter &d : g_field) {
-        const float wx = d.home_x + std::sin(t * d.rate_x + d.phase) * d.amp_x;
-        const float wy = d.home_y + std::sin(t * d.rate_y + d.phase) * d.amp_y;
-
-        Cell c = d.cell;
-        c.x      = logical_w * 0.5f + wx * g_zoom;
-        c.y      = logical_h * 0.5f + wy * g_zoom;
-        c.radius = d.cell.radius * g_zoom;
-        c.angle  = d.cell.angle + t * d.spin;
-        g_visible.push_back(c);
-    }
-
+    ui_begin(g_ui_input, logical_w, logical_h);
     r_begin(logical_w, logical_h, g_scale);
-    mu_Command *cmd = NULL;
-    while (mu_next_command(g_ctx, &cmd)) {
-        switch (cmd->type) {
-            case MU_COMMAND_RECT: r_draw_rect(cmd->rect.rect, cmd->rect.color); break;
-            case MU_COMMAND_TEXT: r_draw_text(cmd->text.str, cmd->text.pos, cmd->text.color); break;
-            case MU_COMMAND_ICON: r_draw_icon(cmd->icon.id, cmd->icon.rect, cmd->icon.color); break;
-            case MU_COMMAND_CLIP: r_set_clip_rect(cmd->clip.rect); break;
-        }
-    }
+    build_ui(logical_w, logical_h);
+    ui_end();
 
     WGPUSurfaceTexture surface_texture = {};
     wgpuSurfaceGetCurrentTexture(g_surface, &surface_texture);
     if (!surface_texture.texture) return;
-    WGPUTextureView view = wgpuTextureCreateView(surface_texture.texture, NULL);
+    WGPUTextureView view = wgpuTextureCreateView(surface_texture.texture, nullptr);
 
     WGPURenderPassColorAttachment color = {};
     color.view       = view;
     color.loadOp     = WGPULoadOp_Clear;
     color.storeOp    = WGPUStoreOp_Store;
-    color.clearValue = WGPUColor{ g_clear[0], g_clear[1], g_clear[2], 1.0 };
+    color.clearValue = WGPUColor{ kClear[0], kClear[1], kClear[2], 1.0 };
     // Required since the 2024 webgpu.h revision; zero here is a validation error.
     color.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+
+    WGPURenderPassDepthStencilAttachment depth = {};
+    depth.view              = g_depth_view;
+    depth.depthLoadOp       = WGPULoadOp_Clear;
+    depth.depthStoreOp      = WGPUStoreOp_Store;
+    depth.depthClearValue   = 1.0f;
 
     WGPURenderPassDescriptor pass_desc = {};
     pass_desc.colorAttachmentCount = 1;
     pass_desc.colorAttachments     = &color;
+    pass_desc.depthStencilAttachment = &depth;
 
-    WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(g_device, NULL);
+    const float aspect = static_cast<float>(g_fb_width) /
+                         static_cast<float>(g_fb_height);
+
+    WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(g_device, nullptr);
     WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &pass_desc);
     // Cells first: r_end sets scissor rects, and they persist for the rest of
     // the pass. The UI draws on top.
-    cells_draw(pass, logical_w, logical_h, g_visible);
+    cells_draw(pass, g_camera.view_proj(aspect), g_camera.eye(), g_cells);
     r_end(pass);
     wgpuRenderPassEncoderEnd(pass);
 
-    WGPUCommandBuffer commands = wgpuCommandEncoderFinish(encoder, NULL);
+    WGPUCommandBuffer commands = wgpuCommandEncoderFinish(encoder, nullptr);
     wgpuQueueSubmit(g_queue, 1, &commands);
 
     // No wgpuSurfacePresent() on the web -- the browser composites the canvas.
@@ -353,42 +321,22 @@ static void frame(void) {
 
 /* ----------------------------------------------------------------- init -- */
 
-static int text_width(mu_Font font, const char *text, int len) {
-    (void)font;
-    if (len == -1) len = (int)strlen(text);
-    return r_get_text_width(text, len);
-}
+static void start() {
+    const double dpr = emscripten_get_device_pixel_ratio();
+    g_scale = std::max(1, static_cast<int>(dpr + 0.5));
 
-static int text_height(mu_Font font) {
-    (void)font;
-    return r_get_text_height();
-}
+    r_init(g_device, g_queue, kSurfaceFormat, kDepthFormat);
+    cells_init(g_device, g_queue, kSurfaceFormat, kDepthFormat);
 
-static void start(void) {
-    double dpr = emscripten_get_device_pixel_ratio();
-    g_scale = (int)(dpr + 0.5);
-    if (g_scale < 1) g_scale = 1;
-
-    g_ctx = new mu_Context();
-    mu_init(g_ctx);
-    g_ctx->text_width  = text_width;
-    g_ctx->text_height = text_height;
-    apply_style();
-
-    r_init(g_device, g_queue, kSurfaceFormat);
-    cells_init(g_device, g_queue, kSurfaceFormat);
-
-    emscripten_set_mousemove_callback(CANVAS, NULL, 0, on_mouse);
-    emscripten_set_mousedown_callback(CANVAS, NULL, 0, on_mouse);
+    emscripten_set_mousemove_callback(CANVAS, nullptr, 0, on_mouse);
+    emscripten_set_mousedown_callback(CANVAS, nullptr, 0, on_mouse);
     // Mouse-up on the window so releasing outside the canvas still registers.
-    emscripten_set_mouseup_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, NULL, 0, on_mouse);
-    emscripten_set_wheel_callback(CANVAS, NULL, 0, on_wheel);
-    emscripten_set_keydown_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, NULL, 0, on_key);
-    emscripten_set_keyup_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, NULL, 0, on_key);
-    emscripten_set_touchstart_callback(CANVAS, NULL, 0, on_touch);
-    emscripten_set_touchmove_callback(CANVAS, NULL, 0, on_touch);
-    emscripten_set_touchend_callback(CANVAS, NULL, 0, on_touch);
-    emscripten_set_touchcancel_callback(CANVAS, NULL, 0, on_touch);
+    emscripten_set_mouseup_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, nullptr, 0, on_mouse);
+    emscripten_set_wheel_callback(CANVAS, nullptr, 0, on_wheel);
+    emscripten_set_touchstart_callback(CANVAS, nullptr, 0, on_touch);
+    emscripten_set_touchmove_callback(CANVAS, nullptr, 0, on_touch);
+    emscripten_set_touchend_callback(CANVAS, nullptr, 0, on_touch);
+    emscripten_set_touchcancel_callback(CANVAS, nullptr, 0, on_touch);
 
     emscripten_set_main_loop(frame, 0, 0);  // 0 => drive off requestAnimationFrame
 }
@@ -397,7 +345,7 @@ static void on_device(WGPURequestDeviceStatus status, WGPUDevice device,
                       WGPUStringView message, void *ud1, void *ud2) {
     (void)ud1; (void)ud2;
     if (status != WGPURequestDeviceStatus_Success) {
-        printf("requestDevice failed: %.*s\n", (int)message.length, message.data);
+        std::printf("requestDevice failed: %.*s\n", (int)message.length, message.data);
         return;
     }
     g_device = device;
@@ -418,7 +366,7 @@ static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter,
                        WGPUStringView message, void *ud1, void *ud2) {
     (void)ud1; (void)ud2;
     if (status != WGPURequestAdapterStatus_Success) {
-        printf("requestAdapter failed: %.*s\n", (int)message.length, message.data);
+        std::printf("requestAdapter failed: %.*s\n", (int)message.length, message.data);
         return;
     }
     g_adapter = adapter;
@@ -430,10 +378,10 @@ static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter,
     wgpuAdapterRequestDevice(g_adapter, &desc, cb);
 }
 
-int main(void) {
-    g_instance = wgpuCreateInstance(NULL);
+int main() {
+    g_instance = wgpuCreateInstance(nullptr);
     if (!g_instance) {
-        printf("wgpuCreateInstance failed -- no WebGPU in this browser?\n");
+        std::printf("wgpuCreateInstance failed -- no WebGPU in this browser?\n");
         return 1;
     }
 

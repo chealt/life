@@ -4,6 +4,12 @@
 
 #include "renderer.h"
 
+// microui itself is gone; its atlas is kept purely as font data, and that file
+// is written against microui's types, so the header still has to be visible.
+extern "C" {
+#include "microui.h"
+}
+
 // microui's atlas indexes its initialiser with [MU_ICON_CLOSE] = {...}, a C99
 // array designator that C++ never adopted. Clang accepts it as an extension;
 // the warning is upstream's to fix, not ours.
@@ -26,7 +32,7 @@ typedef struct {
 typedef struct {
     uint32_t first_index;
     uint32_t index_count;
-    mu_Rect  clip;
+    UiRect   clip;
 } Batch;
 
 static WGPUDevice          g_device;
@@ -41,7 +47,7 @@ static Vertex g_vertices[MAX_QUADS * 4];
 static Batch  g_batches[MAX_BATCHES];
 static int    g_quad_count;
 static int    g_batch_count;
-static mu_Rect g_clip;
+static UiRect g_clip;
 static int    g_width, g_height, g_scale = 1;
 
 static const char *kShader =
@@ -80,7 +86,7 @@ static WGPUStringView str(const char *s) {
     return v;
 }
 
-static int rect_eq(mu_Rect a, mu_Rect b) {
+static int rect_eq(UiRect a, UiRect b) {
     return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
 }
 
@@ -110,7 +116,7 @@ static WGPUTexture create_atlas_texture(void) {
     return texture;
 }
 
-static void create_pipeline(WGPUTextureFormat format) {
+static void create_pipeline(WGPUTextureFormat format, WGPUTextureFormat depth_format) {
     WGPUShaderSourceWGSL wgsl = {};
     wgsl.chain.sType = WGPUSType_ShaderSourceWGSL;
     wgsl.code = str(kShader);
@@ -155,7 +161,17 @@ static void create_pipeline(WGPUTextureFormat format) {
     fragment.targetCount = 1;
     fragment.targets     = &target;
 
+    // The render pass has a depth attachment, so this pipeline has to declare
+    // one too -- but the UI is an overlay and neither tests nor writes it.
+    WGPUDepthStencilState depth = {};
+    depth.format               = depth_format;
+    depth.depthWriteEnabled    = WGPUOptionalBool_False;
+    depth.depthCompare         = WGPUCompareFunction_Always;
+    depth.stencilFront.compare = WGPUCompareFunction_Always;
+    depth.stencilBack.compare  = WGPUCompareFunction_Always;
+
     WGPURenderPipelineDescriptor desc = {};
+    desc.depthStencil           = &depth;
     desc.layout                 = NULL;  // auto layout, inferred from the shader
     desc.vertex.module          = module;
     desc.vertex.entryPoint      = str("vs");
@@ -171,11 +187,12 @@ static void create_pipeline(WGPUTextureFormat format) {
     wgpuShaderModuleRelease(module);
 }
 
-void r_init(WGPUDevice device, WGPUQueue queue, WGPUTextureFormat format) {
+void r_init(WGPUDevice device, WGPUQueue queue, WGPUTextureFormat format,
+            WGPUTextureFormat depth_format) {
     g_device = device;
     g_queue  = queue;
 
-    create_pipeline(format);
+    create_pipeline(format, depth_format);
 
     WGPUBufferDescriptor vb = {};
     vb.usage = WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst;
@@ -232,7 +249,7 @@ void r_init(WGPUDevice device, WGPUQueue queue, WGPUTextureFormat format) {
     g_bind_group = wgpuDeviceCreateBindGroup(g_device, &bgd);
 }
 
-static void push_quad(mu_Rect dst, mu_Rect src, mu_Color color) {
+static void push_quad(UiRect dst, mu_Rect src, UiColor color) {
     if (g_quad_count >= MAX_QUADS) return;
 
     Batch *b = g_batch_count > 0 ? &g_batches[g_batch_count - 1] : NULL;
@@ -273,18 +290,18 @@ void r_begin(int width, int height, int scale) {
     g_scale  = scale < 1 ? 1 : scale;
     g_quad_count  = 0;
     g_batch_count = 0;
-    g_clip = mu_rect(0, 0, width, height);
+    g_clip = UiRect{ 0, 0, width, height };
 
     float uniforms[4] = { (float)width, (float)height, 0.0f, 0.0f };
     wgpuQueueWriteBuffer(g_queue, g_uniform_buffer, 0, uniforms, sizeof(uniforms));
 }
 
-void r_draw_rect(mu_Rect rect, mu_Color color) {
+void r_draw_rect(UiRect rect, UiColor color) {
     push_quad(rect, atlas[ATLAS_WHITE], color);
 }
 
-void r_draw_text(const char *text, mu_Vec2 pos, mu_Color color) {
-    mu_Rect dst = { pos.x, pos.y, 0, 0 };
+void r_draw_text(const char *text, int x, int y, UiColor color) {
+    UiRect dst{ x, y, 0, 0 };
     for (const char *p = text; *p; p++) {
         if ((*p & 0xc0) == 0x80) continue;  // UTF-8 continuation byte
         int chr = (unsigned char)*p;
@@ -297,14 +314,8 @@ void r_draw_text(const char *text, mu_Vec2 pos, mu_Color color) {
     }
 }
 
-void r_draw_icon(int id, mu_Rect rect, mu_Color color) {
-    mu_Rect src = atlas[id];
-    int x = rect.x + (rect.w - src.w) / 2;
-    int y = rect.y + (rect.h - src.h) / 2;
-    push_quad(mu_rect(x, y, src.w, src.h), src, color);
-}
 
-void r_set_clip_rect(mu_Rect rect) {
+void r_set_clip_rect(UiRect rect) {
     g_clip = rect;
 }
 
@@ -342,7 +353,8 @@ void r_end(WGPURenderPassEncoder pass) {
     }
 }
 
-int r_get_text_width(const char *text, int len) {
+int r_text_width(const char *text, int len) {
+    if (len < 0) len = (int)strlen(text);
     int res = 0;
     for (const char *p = text; *p && len--; p++) {
         if ((*p & 0xc0) == 0x80) continue;
@@ -353,6 +365,6 @@ int r_get_text_width(const char *text, int len) {
     return res;
 }
 
-int r_get_text_height(void) {
+int r_text_height() {
     return 18;
 }
