@@ -38,9 +38,21 @@ static float g_speed = 1.0f;
 static int   g_running = 1;
 
 // The first thing being simulated: one red blood cell, drifting.
-static float  g_cell_radius = 48.0f;
+#define CELL_RADIUS 48.0f      // world units
 static double g_sim_time;      // seconds, advanced only while running
 static double g_last_now;      // emscripten_get_now() at the previous frame
+
+// Camera. World units are scaled by this on the way to the screen; the UI is
+// deliberately unaffected, so the panel stays legible at any zoom.
+#define ZOOM_MIN 0.25f
+#define ZOOM_MAX 8.0f
+static float g_zoom = 1.0f;
+
+static void zoom_by(float factor) {
+    g_zoom *= factor;
+    if (g_zoom < ZOOM_MIN) g_zoom = ZOOM_MIN;
+    if (g_zoom > ZOOM_MAX) g_zoom = ZOOM_MAX;
+}
 
 /* ---------------------------------------------------------------- input -- */
 
@@ -65,8 +77,47 @@ static bool on_mouse(int type, const EmscriptenMouseEvent *e, void *ud) {
 
 static bool on_wheel(int type, const EmscriptenWheelEvent *e, void *ud) {
     (void)type; (void)ud;
-    mu_input_scroll(g_ctx, (int)e->deltaX, (int)e->deltaY);
+
+    // Over a microui window the wheel still scrolls it; only the empty canvas
+    // zooms. hover_root is from the last frame, which is close enough.
+    if (g_ctx->hover_root) {
+        mu_input_scroll(g_ctx, (int)e->deltaX, (int)e->deltaY);
+        return true;
+    }
+
+    // Firefox reports lines, and page mode shows up on some configurations.
+    double dy = e->deltaY;
+    if (e->deltaMode == DOM_DELTA_LINE)      dy *= 16.0;
+    else if (e->deltaMode == DOM_DELTA_PAGE) dy *= 100.0;
+
+    zoom_by(expf((float)-dy * 0.0015f));
     return true;
+}
+
+// Pinch: the ratio of finger separation between two moves is the zoom factor,
+// so it needs no reference to absolute distance or DPI.
+static float g_pinch_dist;
+
+static float touch_dist(const EmscriptenTouchEvent *e) {
+    const float dx = (float)(e->touches[0].targetX - e->touches[1].targetX);
+    const float dy = (float)(e->touches[0].targetY - e->touches[1].targetY);
+    return hypotf(dx, dy);
+}
+
+static bool on_touch(int type, const EmscriptenTouchEvent *e, void *ud) {
+    (void)ud;
+    if (type == EMSCRIPTEN_EVENT_TOUCHEND || type == EMSCRIPTEN_EVENT_TOUCHCANCEL ||
+        e->numTouches < 2) {
+        g_pinch_dist = 0.0f;
+        return false;  // let one-finger gestures through
+    }
+
+    const float dist = touch_dist(e);
+    if (type == EMSCRIPTEN_EVENT_TOUCHMOVE && g_pinch_dist > 0.0f && dist > 0.0f) {
+        zoom_by(dist / g_pinch_dist);
+    }
+    g_pinch_dist = dist;
+    return true;  // claim the gesture so the page itself does not zoom
 }
 
 static int map_key(const char *code) {
@@ -103,8 +154,10 @@ static void build_ui(void) {
 
         mu_label(g_ctx, "speed");
         mu_slider(g_ctx, &g_speed, 0.0f, 10.0f);
-        mu_label(g_ctx, "cell size");
-        mu_slider(g_ctx, &g_cell_radius, 8.0f, 160.0f);
+        char zoom[16];
+        snprintf(zoom, sizeof(zoom), "%.0f%%", g_zoom * 100.0f);
+        mu_label(g_ctx, "zoom");
+        mu_label(g_ctx, zoom);
 
         mu_label(g_ctx, "red");
         mu_slider(g_ctx, &g_clear[0], 0.0f, 1.0f);
@@ -118,7 +171,7 @@ static void build_ui(void) {
         if (mu_button(g_ctx, "reset")) {
             g_clear[0] = 0.09f; g_clear[1] = 0.09f; g_clear[2] = 0.12f;
             g_speed = 1.0f;
-            g_cell_radius = 48.0f;
+            g_zoom = 1.0f;
         }
 
         mu_end_window(g_ctx);
@@ -165,12 +218,15 @@ static void frame(void) {
     build_ui();
     mu_end(g_ctx);
 
-    // One cell for now, drifting around the middle of the canvas.
+    // One cell for now, drifting in world units around the origin. The camera
+    // maps world to screen; zoom about the centre of the canvas.
     const float t  = (float)g_sim_time;
-    const float cx = logical_w * 0.5f + sinf(t * 0.6f) * (logical_w * 0.12f);
-    const float cy = logical_h * 0.5f + sinf(t * 0.9f) * (logical_h * 0.08f);
+    const float wx = sinf(t * 0.6f) * 90.0f;
+    const float wy = sinf(t * 0.9f) * 60.0f;
+    const float cx = logical_w * 0.5f + wx * g_zoom;
+    const float cy = logical_h * 0.5f + wy * g_zoom;
     cells_begin(logical_w, logical_h);
-    cells_add(cx, cy, g_cell_radius, 0xFF322DC8u);  // RGBA8: deep red, opaque
+    cells_add(cx, cy, CELL_RADIUS * g_zoom, 0xFF322DC8u);  // RGBA8: deep red
 
     r_begin(logical_w, logical_h, g_scale);
     mu_Command *cmd = NULL;
@@ -251,6 +307,10 @@ static void start(void) {
     emscripten_set_wheel_callback(CANVAS, NULL, 0, on_wheel);
     emscripten_set_keydown_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, NULL, 0, on_key);
     emscripten_set_keyup_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, NULL, 0, on_key);
+    emscripten_set_touchstart_callback(CANVAS, NULL, 0, on_touch);
+    emscripten_set_touchmove_callback(CANVAS, NULL, 0, on_touch);
+    emscripten_set_touchend_callback(CANVAS, NULL, 0, on_touch);
+    emscripten_set_touchcancel_callback(CANVAS, NULL, 0, on_touch);
 
     emscripten_set_main_loop(frame, 0, 0);  // 0 => drive off requestAnimationFrame
 }

@@ -6,7 +6,9 @@
 <title>life</title>
 <style>
   html, body { margin: 0; padding: 0; height: 100%; background: #17171b; overflow: hidden; }
-  #canvas { display: block; width: 100vw; height: 100vh; outline: none; }
+  /* touch-action: none stops the browser claiming pinch and pan for itself --
+     iOS ignores user-scalable=no, so preventDefault alone is not enough. */
+  #canvas { display: block; width: 100vw; height: 100vh; outline: none; touch-action: none; }
   #error {
     position: fixed; inset: 0; display: none; place-content: center; text-align: center;
     font: 15px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; color: #e8e8ea; padding: 2rem;
