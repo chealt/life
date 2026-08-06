@@ -1,0 +1,23 @@
+{
+  "version": 4,
+  "configurations": [
+    {
+      "name": "emscripten",
+      "compilerPath": "${env:HOME}/Code/emscripten-core/emsdk/upstream/bin/clang",
+      "compilerArgs": [
+        "--target=wasm32-unknown-emscripten",
+        "--sysroot=${env:HOME}/Code/emscripten-core/emsdk/upstream/emscripten/cache/sysroot"
+      ],
+      "cStandard": "c99",
+      "intelliSenseMode": "clang-x64",
+      "includePath": [
+        "${workspaceFolder}/src",
+        "${workspaceFolder}/third_party/microui/src",
+        "${workspaceFolder}/third_party/microui/demo",
+        "${env:HOME}/Code/emscripten-core/emsdk/upstream/emscripten/cache/ports/emdawnwebgpu/emdawnwebgpu_pkg/webgpu/include",
+        "${env:HOME}/Code/emscripten-core/emsdk/upstream/emscripten/cache/sysroot/include/fakesdl",
+        "${env:HOME}/Code/emscripten-core/emsdk/upstream/emscripten/cache/sysroot/include/compat"
+      ]
+    }
+  ]
+}
