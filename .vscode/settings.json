@@ -1,1 +1,4 @@
-{}
+{
+  "html.format.extraLiners": "",
+  "html.format.wrapLineLength": 120
+}
