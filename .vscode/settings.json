@@ -1,4 +1,8 @@
 {
   "html.format.extraLiners": "",
-  "html.format.wrapLineLength": 120
+  "html.format.wrapLineLength": 120,
+  "[rust]": {
+    "editor.defaultFormatter": "rust-lang.rust-analyzer",
+    "editor.formatOnSave": true
+  }
 }
